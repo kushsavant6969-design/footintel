@@ -519,7 +519,6 @@ def chart_commercial_opportunity(df: pd.DataFrame) -> go.Figure:
         title=dict(text="Commercial Score by Segment", x=0.02, y=0.97),
         xaxis=dict(title="Avg Commercial Score", range=[0, 115], gridcolor="#1f2937"),
         yaxis=dict(gridcolor="#1f2937"),
-        margin=dict(l=8, r=60, t=44, b=8),
     )
     return fig
 
