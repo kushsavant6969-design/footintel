@@ -459,20 +459,20 @@ def assign_journey_stage(row: pd.Series) -> str:
 
 
 def assign_segment(row: pd.Series) -> str:
-    e     = row["engagement_score"]
-    c     = row["commercial_score"]
-    l     = row["loyalty_score"]
-    churn = row["churn_risk_index"]
+    e      = row["engagement_score"]
+    c      = row["commercial_score"]
+    l      = row["loyalty_score"]
+    churn  = row["churn_risk_label"]   # HIGH / MED / LOW (percentile-based)
     tenure = row.get("tenure_days", 365)
 
-    if l >= 65 and c >= 45:
+    if l >= 60 and c >= 40:
         return "Loyal Fans"
-    if churn >= 65:
-        return "Win Back"
-    if e >= 55 and c < 45:
+    if e >= 65 and c < 42:            # rescue engaged-but-not-commercial fans before Win Back
         return "High Potential"
-    if e < 30 and c < 30 and tenure > 90:
+    if e < 32 and c < 32 and tenure > 90:   # truly unactivated fans before Win Back
         return "Dormant"
+    if churn == "HIGH":
+        return "Win Back"
     return "Casual"
 
 
@@ -494,8 +494,11 @@ def process_data(df: pd.DataFrame, col: dict) -> pd.DataFrame:
     out["churn_risk_index"] = (
         compute_churn_risk_base(out, col) + (100 - out["engagement_score"]) * 0.15
     ).clip(0, 100).round(1)
+    # Percentile-based thirds so HIGH/MED/LOW are always roughly equal in size
+    p33 = out["churn_risk_index"].quantile(0.33)
+    p67 = out["churn_risk_index"].quantile(0.67)
     out["churn_risk_label"] = out["churn_risk_index"].apply(
-        lambda x: "HIGH" if x >= 65 else ("MED" if x >= 35 else "LOW")
+        lambda x: "HIGH" if x >= p67 else ("MED" if x >= p33 else "LOW")
     )
 
     # Conversion probability = base (email CTR + inapp CTR + membership gap) + commercial component
@@ -593,27 +596,44 @@ def generate_sample_csv() -> bytes:
             return ""
         return (today - timedelta(days=int(days_ago))).strftime("%Y-%m-%d")
 
-    # Last purchase: 0–730 days ago (NaN if no purchases)
-    lp_days = np.where(has_purchases, rng.exponential(160, n).clip(0, 730), np.nan)
-    # First purchase: between lp_days and join_date
-    lp_safe = np.where(np.isnan(lp_days), 0, lp_days)
-    fp_gap  = rng.integers(30, 400, n)
-    fp_days = np.where(has_purchases, np.minimum(join_days - 1, lp_safe + fp_gap).clip(0), np.nan)
+    # Membership tier shift: Season Ticket → more recent, None → older
+    tier_shift_purchase = np.array([{"None": 55, "Basic": 20, "Paid": -10, "Season Ticket": -25}[m] for m in mem_cats])
+    tier_shift_app      = np.array([{"None": 25, "Basic": 10, "Paid": -5,  "Season Ticket": -15}[m] for m in mem_cats])
+    tier_shift_email    = np.array([{"None": 20, "Basic": 8,  "Paid": -5,  "Season Ticket": -10}[m] for m in mem_cats])
 
-    # App dates
-    la_days = np.where(app_mask, rng.exponential(30, n).clip(0, 180), np.nan)
+    def _piecewise(rng, n, breaks, probs, shift, lo_cap, hi_cap):
+        """Piecewise uniform days with membership tier shift."""
+        buckets = rng.choice(len(probs), size=n, p=probs)
+        out = np.zeros(n, dtype=float)
+        for i, (lo, hi) in enumerate(zip(breaks[:-1], breaks[1:])):
+            mask = buckets == i
+            if mask.any():
+                out[mask] = rng.uniform(lo, hi, mask.sum())
+        return np.clip(out + shift, lo_cap, hi_cap).astype(int)
+
+    # Last_Purchase_Date: 30% ≤60d, 40% 61-180d, 30% >180d
+    lp_all  = _piecewise(rng, n, [0, 60, 180, 730], [0.30, 0.40, 0.30], tier_shift_purchase, 0, 730)
+    lp_days = np.where(has_purchases, lp_all.astype(float), np.nan)
+    lp_safe = np.where(np.isnan(lp_days), 0, lp_days)
+    fp_days = np.where(has_purchases, np.minimum(join_days - 1, lp_safe + rng.integers(30, 400, n)).clip(0), np.nan)
+
+    # Last_App_Open: 40% ≤30d, 35% 31-90d, 25% >90d
+    la_all  = _piecewise(rng, n, [0, 30, 90, 365], [0.40, 0.35, 0.25], tier_shift_app, 0, 365)
+    la_days = np.where(app_mask, la_all.astype(float), np.nan)
     la_safe = np.where(np.isnan(la_days), 0, la_days)
     fa_days = np.where(app_mask, np.minimum(join_days - 1, la_safe + rng.integers(30, 300, n)).clip(0), np.nan)
 
-    # Email dates
+    # Last_Email_Open: 45% ≤30d, 35% 31-90d, 20% >90d
     has_email = email_opens > 0
-    le_days   = np.where(has_email, rng.exponential(45, n).clip(0, 365), np.nan)
-    le_safe   = np.where(np.isnan(le_days), 0, le_days)
-    fe_days   = np.where(has_email, np.minimum(join_days - 1, le_safe + rng.integers(30, 400, n)).clip(0), np.nan)
+    le_all  = _piecewise(rng, n, [0, 30, 90, 365], [0.45, 0.35, 0.20], tier_shift_email, 0, 365)
+    le_days = np.where(has_email, le_all.astype(float), np.nan)
+    le_safe = np.where(np.isnan(le_days), 0, le_days)
+    fe_days = np.where(has_email, np.minimum(join_days - 1, le_safe + rng.integers(30, 400, n)).clip(0), np.nan)
 
-    # Article dates
-    has_art = art_views > 0
-    lar_days = np.where(has_art, rng.exponential(20, n).clip(0, 180), np.nan)
+    # Article dates: 40% ≤14d, 40% 15-60d, 20% >60d
+    has_art  = art_views > 0
+    lar_all  = _piecewise(rng, n, [0, 14, 60, 180], [0.40, 0.40, 0.20], np.zeros(n, dtype=int), 0, 180)
+    lar_days = np.where(has_art, lar_all.astype(float), np.nan)
     lar_safe = np.where(np.isnan(lar_days), 0, lar_days)
     far_days = np.where(has_art, np.minimum(join_days - 1, lar_safe + rng.integers(30, 365, n)).clip(0), np.nan)
 
