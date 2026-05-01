@@ -4,6 +4,7 @@ import plotly.express as px
 import pandas as pd
 import numpy as np
 import io
+import hashlib
 from datetime import datetime, timedelta
 
 st.set_page_config(
@@ -131,6 +132,23 @@ COLUMN_ALIASES: dict[str, list[str]] = {
     "total_revenue":        ["total_revenue", "revenue", "total_spend", "ltv", "spend", "total_value", "lifetime_value"],
 }
 
+FIELD_LABELS: dict[str, str] = {
+    "user_id":              "User ID",
+    "age":                  "Age",
+    "gender":               "Gender",
+    "country":              "Country / Region",
+    "app_opens":            "App Opens",
+    "email_opens":          "Email Opens",
+    "article_views":        "Article Views",
+    "in_app_clicks":        "In-App Clicks",
+    "ticket_purchases":     "Ticket Purchases",
+    "membership_purchases": "Membership Purchases",
+    "retail_purchases":     "Retail Purchases",
+    "last_purchase_date":   "Last Purchase Date",
+    "join_date":            "Join Date",
+    "total_revenue":        "Total Revenue",
+}
+
 AGE_GROUPS = [
     ("Child",       0,  12),
     ("Young Adult", 13, 25),
@@ -223,7 +241,6 @@ def compute_engagement_score(df: pd.DataFrame, col: dict) -> pd.Series:
             score += _pct(df[col[field]]) * w
         else:
             missing_weight += w
-    # Redistribute missing weight as neutral 50
     if missing_weight > 0:
         score += 50.0 * missing_weight
     return score.clip(0, 100)
@@ -233,7 +250,6 @@ def compute_commercial_score(df: pd.DataFrame, col: dict) -> tuple[pd.Series, pd
     """Returns (commercial_score, recency_days)."""
     today = datetime.today()
 
-    # Revenue / proxy (40%)
     if "total_revenue" in col:
         rev = _pct(df[col["total_revenue"]]) * 0.40
     else:
@@ -243,7 +259,6 @@ def compute_commercial_score(df: pd.DataFrame, col: dict) -> tuple[pd.Series, pd
                 purchases += pd.to_numeric(df[col[f]], errors="coerce").fillna(0)
         rev = _pct(purchases) * 0.40
 
-    # Recency (35%) — exponential decay; 0 days = 100, 180 days ≈ 37, 365 days ≈ 13
     if "last_purchase_date" in col:
         dates = pd.to_datetime(df[col["last_purchase_date"]], errors="coerce")
         recency_days = (today - dates).dt.days.fillna(730)
@@ -251,7 +266,6 @@ def compute_commercial_score(df: pd.DataFrame, col: dict) -> tuple[pd.Series, pd
         recency_days = pd.Series(365.0, index=df.index)
     recency_score = (100 * np.exp(-recency_days / 180)).clip(0, 100) * 0.35
 
-    # Frequency (25%)
     freq = pd.Series(0.0, index=df.index)
     for f in ("ticket_purchases", "membership_purchases", "retail_purchases"):
         if f in col:
@@ -266,7 +280,6 @@ def compute_loyalty_score(df: pd.DataFrame, col: dict) -> tuple[pd.Series, pd.Se
     """Returns (loyalty_score, tenure_days)."""
     today = datetime.today()
 
-    # Tenure (40%) — capped at 5 years = 100
     if "join_date" in col:
         join = pd.to_datetime(df[col["join_date"]], errors="coerce")
         tenure_days = (today - join).dt.days.fillna(0).clip(0)
@@ -274,7 +287,6 @@ def compute_loyalty_score(df: pd.DataFrame, col: dict) -> tuple[pd.Series, pd.Se
         tenure_days = pd.Series(365.0, index=df.index)
     tenure_score = (tenure_days / 1825 * 100).clip(0, 100) * 0.40
 
-    # Purchase diversity across 3 categories (35%) — full diversity = 100
     diversity = pd.Series(0.0, index=df.index)
     for f in ("ticket_purchases", "membership_purchases", "retail_purchases"):
         if f in col:
@@ -284,7 +296,6 @@ def compute_loyalty_score(df: pd.DataFrame, col: dict) -> tuple[pd.Series, pd.Se
         diversity = pd.Series(33.0, index=df.index)
     diversity_score = diversity * 0.35
 
-    # Purchase frequency consistency (25%)
     total_purchases = pd.Series(0.0, index=df.index)
     for f in ("ticket_purchases", "membership_purchases", "retail_purchases"):
         if f in col:
@@ -590,6 +601,136 @@ def segment_summary(df: pd.DataFrame) -> pd.DataFrame:
     return s.sort_values("Avg_Composite", ascending=False)
 
 
+def _pdf_safe(text: str) -> str:
+    """Strip non-latin-1 characters for fpdf2 compatibility."""
+    return str(text).encode("latin-1", errors="replace").decode("latin-1")
+
+
+def generate_pdf_report(df: pd.DataFrame, club_name: str) -> bytes:
+    from fpdf import FPDF
+
+    today_str = datetime.today().strftime("%Y-%m-%d")
+    total    = len(df)
+    high_val = int(df["segment"].isin(["Champions", "Loyal Fans"]).sum())
+    at_risk  = int(df["segment"].isin(["At Risk", "Dormant", "Win Back"]).sum())
+    pot      = int(df["segment"].isin(["High Potential", "Rising Stars"]).sum())
+    avg_e    = df["engagement_score"].mean()
+    avg_c    = df["commercial_score"].mean()
+    avg_l    = df["loyalty_score"].mean()
+
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_auto_page_break(auto=True, margin=15)
+
+    # Title block
+    pdf.set_font("Helvetica", "B", 20)
+    title = _pdf_safe(f"{club_name} — Fan Segmentation Report" if club_name else "Fan Segmentation Report")
+    pdf.cell(0, 12, title, ln=True, align="C")
+    pdf.set_font("Helvetica", size=9)
+    pdf.set_text_color(130, 130, 130)
+    pdf.cell(0, 7, f"Generated by FootIntel  |  {today_str}", ln=True, align="C")
+    pdf.set_text_color(0, 0, 0)
+    pdf.ln(4)
+    pdf.set_draw_color(200, 200, 200)
+    pdf.line(10, pdf.get_y(), 200, pdf.get_y())
+    pdf.ln(6)
+
+    # Executive summary
+    pdf.set_font("Helvetica", "B", 13)
+    pdf.cell(0, 8, "Executive Summary", ln=True)
+    pdf.set_font("Helvetica", size=10)
+    rows = [
+        f"Total fans analysed:              {total:,}",
+        f"High-value (Champions + Loyal):   {high_val:,}  ({high_val/total*100:.0f}% of base)",
+        f"Growth potential (High Pot. + Rising Stars):  {pot:,}  ({pot/total*100:.0f}% of base)",
+        f"Requires action (At Risk + Dormant + Win Back):  {at_risk:,}  ({at_risk/total*100:.0f}% of base)",
+        f"Avg Engagement: {avg_e:.1f}   Avg Commercial: {avg_c:.1f}   Avg Loyalty: {avg_l:.1f}",
+    ]
+    for r in rows:
+        pdf.cell(0, 6, _pdf_safe(r), ln=True)
+    pdf.ln(5)
+
+    # Segment summary table
+    pdf.set_font("Helvetica", "B", 13)
+    pdf.cell(0, 8, "Segment Summary", ln=True)
+    col_w = [42, 18, 24, 24, 24, 24, 14]
+    headers = ["Segment", "Fans", "Avg Eng", "Avg Com", "Avg Loy", "Avg Comp", "Risk"]
+    pdf.set_font("Helvetica", "B", 8)
+    pdf.set_fill_color(230, 230, 230)
+    for i, h in enumerate(headers):
+        pdf.cell(col_w[i], 7, h, border=1, fill=True, align="C")
+    pdf.ln()
+    pdf.set_font("Helvetica", size=8)
+    summary = segment_summary(df)
+    for _, row in summary.iterrows():
+        pdf.cell(col_w[0], 6, _pdf_safe(str(row["segment"])), border=1)
+        pdf.cell(col_w[1], 6, str(int(row["Fan_Count"])), border=1, align="C")
+        pdf.cell(col_w[2], 6, f"{row['Avg_Engagement']:.1f}", border=1, align="C")
+        pdf.cell(col_w[3], 6, f"{row['Avg_Commercial']:.1f}", border=1, align="C")
+        pdf.cell(col_w[4], 6, f"{row['Avg_Loyalty']:.1f}", border=1, align="C")
+        pdf.cell(col_w[5], 6, f"{row['Avg_Composite']:.1f}", border=1, align="C")
+        pdf.cell(col_w[6], 6, _pdf_safe(str(row["Risk"])), border=1, align="C")
+        pdf.ln()
+    pdf.ln(5)
+
+    # Age breakdown table
+    pdf.set_font("Helvetica", "B", 13)
+    pdf.cell(0, 8, "Age Group Breakdown", ln=True)
+    age_table = (
+        df.groupby("age_group")
+        .agg(
+            Count         =("composite_score", "count"),
+            Avg_Engagement=("engagement_score", "mean"),
+            Avg_Commercial=("commercial_score", "mean"),
+            Avg_Loyalty   =("loyalty_score",    "mean"),
+            Avg_Composite =("composite_score",  "mean"),
+        )
+        .round(1)
+        .reset_index()
+    )
+    age_w = [38, 18, 28, 28, 28, 28]
+    age_h = ["Age Group", "Count", "Avg Eng", "Avg Com", "Avg Loy", "Avg Comp"]
+    pdf.set_font("Helvetica", "B", 8)
+    pdf.set_fill_color(230, 230, 230)
+    for i, h in enumerate(age_h):
+        pdf.cell(age_w[i], 7, h, border=1, fill=True, align="C")
+    pdf.ln()
+    pdf.set_font("Helvetica", size=8)
+    for _, row in age_table.iterrows():
+        pdf.cell(age_w[0], 6, _pdf_safe(str(row["age_group"])), border=1)
+        pdf.cell(age_w[1], 6, str(int(row["Count"])), border=1, align="C")
+        pdf.cell(age_w[2], 6, f"{row['Avg_Engagement']:.1f}", border=1, align="C")
+        pdf.cell(age_w[3], 6, f"{row['Avg_Commercial']:.1f}", border=1, align="C")
+        pdf.cell(age_w[4], 6, f"{row['Avg_Loyalty']:.1f}", border=1, align="C")
+        pdf.cell(age_w[5], 6, f"{row['Avg_Composite']:.1f}", border=1, align="C")
+        pdf.ln()
+    pdf.ln(5)
+
+    # Recommendations
+    pdf.set_font("Helvetica", "B", 13)
+    pdf.cell(0, 8, "Segment Recommendations", ln=True)
+    seg_counts = df["segment"].value_counts()
+    for seg, info in SEGMENT_INFO.items():
+        count = int(seg_counts.get(seg, 0))
+        if count == 0:
+            continue
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.cell(0, 7, _pdf_safe(f"{seg}   ({count:,} fans  |  Risk: {info['risk']})"), ln=True)
+        pdf.set_font("Helvetica", size=8)
+        pdf.multi_cell(0, 5, _pdf_safe(info["recommendation"]))
+        pdf.set_font("Helvetica", "I", 8)
+        pdf.multi_cell(0, 5, _pdf_safe("Actions: " + "  |  ".join(info["actions"])))
+        pdf.ln(2)
+
+    # Footer
+    pdf.set_y(-15)
+    pdf.set_font("Helvetica", "I", 8)
+    pdf.set_text_color(150, 150, 150)
+    pdf.cell(0, 10, f"FootIntel  |  Fan Intelligence Platform  |  {today_str}", align="C")
+
+    return bytes(pdf.output())
+
+
 # ── App ───────────────────────────────────────────────────────────────────────
 
 st.markdown("""
@@ -610,13 +751,25 @@ tab_upload, tab_dashboard, tab_report = st.tabs(["⬆  Upload & Configure", "�
 # TAB 1 — UPLOAD
 # ─────────────────────────────────────────────────────────────────────────────
 with tab_upload:
+
+    # Club name input
+    cn_col, _ = st.columns([2, 3])
+    with cn_col:
+        st.text_input(
+            "Enter your club name",
+            placeholder="e.g. Chelsea FC",
+            key="club_name",
+        )
+
+    st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
+
     left, right = st.columns([3, 2], gap="large")
 
     with left:
         st.markdown(card(
             '<div style="font-size:12px;color:#9ca3af">Upload a CSV of fan data. '
-            'FootIntel will auto-detect your columns, score every fan across three dimensions, '
-            'and segment them instantly.</div>'
+            'FootIntel will auto-detect your columns, let you confirm the mapping, '
+            'then score every fan across three dimensions and segment them instantly.</div>'
         ), unsafe_allow_html=True)
 
         uploaded = st.file_uploader("Upload CSV", type=["csv"], label_visibility="collapsed")
@@ -631,36 +784,41 @@ with tab_upload:
 
         if uploaded is not None:
             try:
-                df_raw = pd.read_csv(uploaded)
-                col_map = detect_columns(df_raw)
-                st.session_state["df_raw"]   = df_raw
-                st.session_state["col_map"]  = col_map
+                file_hash = hashlib.md5(uploaded.getvalue()).hexdigest()
+                if st.session_state.get("_file_hash") != file_hash:
+                    df_raw = pd.read_csv(io.BytesIO(uploaded.getvalue()))
+                    col_map_auto = detect_columns(df_raw)
+                    st.session_state["_file_hash"]    = file_hash
+                    st.session_state["df_raw"]        = df_raw
+                    st.session_state["col_map_auto"]  = col_map_auto
+                    st.session_state.pop("df_processed", None)
+                    st.session_state.pop("col_map", None)
 
-                mapped   = list(col_map.keys())
-                unmapped = [f for f in COLUMN_ALIASES if f not in col_map]
+                df_raw       = st.session_state["df_raw"]
+                col_map_auto = st.session_state.get("col_map_auto", {})
+                mapped       = list(col_map_auto.keys())
+                unmapped     = [f for f in COLUMN_ALIASES if f not in col_map_auto]
 
                 st.markdown(card(
                     f'<div style="font-size:10px;color:#22c55e;margin-bottom:6px">'
-                    f'✓ Loaded {len(df_raw):,} fans · {len(df_raw.columns)} columns</div>'
-                    f'<div style="font-size:10px;color:#6b7280">Detected: '
-                    f'{", ".join(mapped) if mapped else "none auto-matched"}</div>'
+                    f'✓ Loaded {len(df_raw):,} fans &nbsp;·&nbsp; {len(df_raw.columns)} columns detected</div>'
+                    f'<div style="font-size:10px;color:#6b7280">Auto-matched: '
+                    f'{", ".join(mapped) if mapped else "none"}</div>'
                     + (
                         f'<div style="font-size:10px;color:#f59e0b;margin-top:4px">'
-                        f'Not found: {", ".join(unmapped[:6])}</div>'
+                        f'Not matched: {", ".join(unmapped[:8])}</div>'
                         if unmapped else ""
                     ),
                     border="#22c55e",
                 ), unsafe_allow_html=True)
 
-                with st.spinner("Scoring and segmenting fans…"):
-                    df_proc = process_data(df_raw, col_map)
-                    st.session_state["df_processed"] = df_proc
-
-                st.success(
-                    f"Done — {len(df_proc):,} fans scored and assigned to "
-                    f"{df_proc['segment'].nunique()} segments. "
-                    "Switch to the Dashboard tab."
-                )
+                if "df_processed" in st.session_state:
+                    df_proc = st.session_state["df_processed"]
+                    st.success(
+                        f"Done — {len(df_proc):,} fans scored and assigned to "
+                        f"{df_proc['segment'].nunique()} segments. "
+                        "Switch to the Dashboard tab."
+                    )
 
             except Exception as exc:
                 st.error(f"Could not process file: {exc}")
@@ -711,6 +869,108 @@ with tab_upload:
             '</div>'
         ), unsafe_allow_html=True)
 
+    # ── Column mapping form (shown after upload, before processing) ────────────
+    if "df_raw" in st.session_state and "df_processed" not in st.session_state:
+        df_raw       = st.session_state["df_raw"]
+        col_map_auto = st.session_state.get("col_map_auto", {})
+        csv_cols     = list(df_raw.columns)
+        options      = ["— not mapped —"] + csv_cols
+
+        st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+        st.markdown(
+            '<div style="font-family:\'Syne\',sans-serif;font-size:17px;font-weight:700;'
+            'color:#e5e7eb;margin-bottom:8px">Map Your Columns</div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(card(
+            f'<div style="font-size:11px;color:#9ca3af">'
+            f'Review and confirm the column mapping below. Fields auto-matched from your CSV are pre-filled. '
+            f'<b style="color:#c8f135">Missing columns will use neutral scores — map as many as possible for accuracy.</b><br><br>'
+            f'<span style="color:#22c55e">{len(df_raw):,} fans loaded</span> &nbsp;·&nbsp; '
+            f'<span style="color:#22c55e">{len(df_raw.columns)} columns detected</span> &nbsp;·&nbsp; '
+            f'<span style="color:#c8f135">{len(col_map_auto)} auto-matched</span>'
+            f'</div>'
+        ), unsafe_allow_html=True)
+
+        def _sel_idx(field: str) -> int:
+            detected = col_map_auto.get(field)
+            if detected and detected in options:
+                return options.index(detected)
+            return 0
+
+        with st.form("col_mapping_form"):
+            st.markdown(
+                '<div style="font-size:10px;color:#6b7280;text-transform:uppercase;'
+                'letter-spacing:.08em;margin-bottom:6px">Identifiers &amp; Demographics</div>',
+                unsafe_allow_html=True,
+            )
+            d1, d2, d3, d4 = st.columns(4)
+            uid  = d1.selectbox("User ID",          options, index=_sel_idx("user_id"),  key="map_user_id")
+            age  = d2.selectbox("Age",               options, index=_sel_idx("age"),      key="map_age")
+            gen  = d3.selectbox("Gender",            options, index=_sel_idx("gender"),   key="map_gender")
+            cty  = d4.selectbox("Country / Region",  options, index=_sel_idx("country"),  key="map_country")
+
+            st.markdown(
+                '<div style="font-size:10px;color:#6b7280;text-transform:uppercase;'
+                'letter-spacing:.08em;margin:12px 0 6px">Engagement Dimensions</div>',
+                unsafe_allow_html=True,
+            )
+            e1, e2, e3, e4 = st.columns(4)
+            apo  = e1.selectbox("App Opens",     options, index=_sel_idx("app_opens"),     key="map_app_opens")
+            emo  = e2.selectbox("Email Opens",   options, index=_sel_idx("email_opens"),   key="map_email_opens")
+            arv  = e3.selectbox("Article Views", options, index=_sel_idx("article_views"), key="map_article_views")
+            iap  = e4.selectbox("In-App Clicks", options, index=_sel_idx("in_app_clicks"), key="map_in_app_clicks")
+
+            st.markdown(
+                '<div style="font-size:10px;color:#6b7280;text-transform:uppercase;'
+                'letter-spacing:.08em;margin:12px 0 6px">Commercial Dimensions</div>',
+                unsafe_allow_html=True,
+            )
+            c1, c2, c3, c4 = st.columns(4)
+            tix  = c1.selectbox("Ticket Purchases",     options, index=_sel_idx("ticket_purchases"),     key="map_ticket_purchases")
+            msp  = c2.selectbox("Membership Purchases", options, index=_sel_idx("membership_purchases"), key="map_membership_purchases")
+            ret  = c3.selectbox("Retail Purchases",     options, index=_sel_idx("retail_purchases"),     key="map_retail_purchases")
+            rev  = c4.selectbox("Total Revenue",        options, index=_sel_idx("total_revenue"),        key="map_total_revenue")
+
+            st.markdown(
+                '<div style="font-size:10px;color:#6b7280;text-transform:uppercase;'
+                'letter-spacing:.08em;margin:12px 0 6px">Date Columns</div>',
+                unsafe_allow_html=True,
+            )
+            t1, t2, _, _ = st.columns(4)
+            lpd  = t1.selectbox("Last Purchase Date", options, index=_sel_idx("last_purchase_date"), key="map_last_purchase_date")
+            jnd  = t2.selectbox("Join Date",          options, index=_sel_idx("join_date"),          key="map_join_date")
+
+            st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
+            submitted = st.form_submit_button("✓  Confirm Mapping & Analyse Fans", use_container_width=False)
+
+            if submitted:
+                raw_selections = {
+                    "user_id":              uid,
+                    "age":                  age,
+                    "gender":               gen,
+                    "country":              cty,
+                    "app_opens":            apo,
+                    "email_opens":          emo,
+                    "article_views":        arv,
+                    "in_app_clicks":        iap,
+                    "ticket_purchases":     tix,
+                    "membership_purchases": msp,
+                    "retail_purchases":     ret,
+                    "total_revenue":        rev,
+                    "last_purchase_date":   lpd,
+                    "join_date":            jnd,
+                }
+                confirmed_map = {
+                    field: val
+                    for field, val in raw_selections.items()
+                    if val != "— not mapped —"
+                }
+                st.session_state["col_map"] = confirmed_map
+                df_proc = process_data(df_raw, confirmed_map)
+                st.session_state["df_processed"] = df_proc
+                st.rerun()
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB 2 — DASHBOARD
@@ -722,117 +982,142 @@ with tab_dashboard:
             'Upload a CSV in the Upload tab to populate the dashboard.</div>'
         ), unsafe_allow_html=True)
     else:
-        df = st.session_state["df_processed"]
+        df_all         = st.session_state["df_processed"]
+        col_map_stored = st.session_state.get("col_map", {})
+        club_name      = st.session_state.get("club_name", "").strip()
+
+        # Club heading
+        heading = f"{club_name} — Fan Dashboard" if club_name else "Fan Dashboard"
+        st.markdown(
+            f'<div style="font-family:\'Syne\',sans-serif;font-size:20px;font-weight:700;'
+            f'color:#e5e7eb;margin-bottom:12px">{heading}</div>',
+            unsafe_allow_html=True,
+        )
+
+        # Country filter
+        if "country" in col_map_stored:
+            country_col = col_map_stored["country"]
+            all_countries = sorted(df_all[country_col].dropna().astype(str).unique().tolist())
+            selected_countries = st.multiselect(
+                "Filter by Country / Region",
+                options=all_countries,
+                default=all_countries,
+                key="country_filter",
+            )
+            df = df_all[df_all[country_col].astype(str).isin(selected_countries)] if selected_countries else df_all
+        else:
+            df = df_all
+
         total = len(df)
 
-        # KPI strip
-        champions_n = (df["segment"] == "Champions").sum()
-        high_val_n  = df["segment"].isin(["Champions", "Loyal Fans"]).sum()
-        at_risk_n   = df["segment"].isin(["At Risk", "Dormant", "Win Back"]).sum()
-        avg_e = df["engagement_score"].mean()
-        avg_c = df["commercial_score"].mean()
-        avg_l = df["loyalty_score"].mean()
+        if total == 0:
+            st.warning("No fans match the selected country filter.")
+        else:
+            # KPI strip
+            at_risk_n = df["segment"].isin(["At Risk", "Dormant", "Win Back"]).sum()
+            avg_e = df["engagement_score"].mean()
+            avg_c = df["commercial_score"].mean()
+            avg_l = df["loyalty_score"].mean()
 
-        k1, k2, k3, k4, k5 = st.columns(5)
-        with k1: st.markdown(kpi("Total Fans", f"{total:,}",           "in dataset"),              unsafe_allow_html=True)
-        with k2: st.markdown(kpi("Avg Engagement",  f"{avg_e:.0f}",   "/ 100", "#3d9cf0"),         unsafe_allow_html=True)
-        with k3: st.markdown(kpi("Avg Commercial",  f"{avg_c:.0f}",   "/ 100", "#c8f135"),         unsafe_allow_html=True)
-        with k4: st.markdown(kpi("Avg Loyalty",     f"{avg_l:.0f}",   "/ 100", "#22c55e"),         unsafe_allow_html=True)
-        with k5: st.markdown(kpi("At Risk / Dormant", f"{at_risk_n:,}", f"{at_risk_n/total*100:.0f}% of base", "#ef4444"), unsafe_allow_html=True)
+            k1, k2, k3, k4, k5 = st.columns(5)
+            with k1: st.markdown(kpi("Total Fans",      f"{total:,}",        "in selection"),                    unsafe_allow_html=True)
+            with k2: st.markdown(kpi("Avg Engagement",  f"{avg_e:.0f}",      "/ 100", "#3d9cf0"),                unsafe_allow_html=True)
+            with k3: st.markdown(kpi("Avg Commercial",  f"{avg_c:.0f}",      "/ 100", "#c8f135"),                unsafe_allow_html=True)
+            with k4: st.markdown(kpi("Avg Loyalty",     f"{avg_l:.0f}",      "/ 100", "#22c55e"),                unsafe_allow_html=True)
+            with k5: st.markdown(kpi("At Risk / Dormant", f"{at_risk_n:,}",  f"{at_risk_n/total*100:.0f}% of base", "#ef4444"), unsafe_allow_html=True)
 
-        st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
+            st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
 
-        # Row 1 — donut + age bar
-        r1c1, r1c2 = st.columns(2)
-        with r1c1:
-            st.plotly_chart(chart_segment_donut(df),   use_container_width=True, config={"displayModeBar": False})
-        with r1c2:
-            st.plotly_chart(chart_age_segment_bar(df), use_container_width=True, config={"displayModeBar": False})
+            # Row 1 — donut + age bar
+            r1c1, r1c2 = st.columns(2)
+            with r1c1:
+                st.plotly_chart(chart_segment_donut(df),   use_container_width=True, config={"displayModeBar": False})
+            with r1c2:
+                st.plotly_chart(chart_age_segment_bar(df), use_container_width=True, config={"displayModeBar": False})
 
-        # Row 2 — full-width scatter
-        st.plotly_chart(chart_landscape(df), use_container_width=True, config={"displayModeBar": False})
+            # Row 2 — full-width scatter
+            st.plotly_chart(chart_landscape(df), use_container_width=True, config={"displayModeBar": False})
 
-        # Row 3 — grouped bar + commercial bar
-        r3c1, r3c2 = st.columns(2)
-        with r3c1:
-            st.plotly_chart(chart_scores_by_segment(df),       use_container_width=True, config={"displayModeBar": False})
-        with r3c2:
-            st.plotly_chart(chart_commercial_opportunity(df),  use_container_width=True, config={"displayModeBar": False})
+            # Row 3 — grouped bar + commercial bar
+            r3c1, r3c2 = st.columns(2)
+            with r3c1:
+                st.plotly_chart(chart_scores_by_segment(df),       use_container_width=True, config={"displayModeBar": False})
+            with r3c2:
+                st.plotly_chart(chart_commercial_opportunity(df),  use_container_width=True, config={"displayModeBar": False})
 
-        # Row 4 — radar
-        st.plotly_chart(chart_age_scores(df), use_container_width=True, config={"displayModeBar": False})
+            # Row 4 — radar
+            st.plotly_chart(chart_age_scores(df), use_container_width=True, config={"displayModeBar": False})
 
-        # ── Segment insight cards ──────────────────────────────────────────────
-        st.markdown(
-            '<div style="font-family:\'Syne\',sans-serif;font-size:17px;font-weight:700;'
-            'color:#e5e7eb;margin:24px 0 14px">Segment Insights &amp; Recommended Actions</div>',
-            unsafe_allow_html=True,
-        )
-        seg_counts = df["segment"].value_counts()
-        seg_keys = [s for s in SEGMENT_INFO if s in seg_counts.index]
+            # ── Segment insight cards ──────────────────────────────────────────
+            st.markdown(
+                '<div style="font-family:\'Syne\',sans-serif;font-size:17px;font-weight:700;'
+                'color:#e5e7eb;margin:24px 0 14px">Segment Insights &amp; Recommended Actions</div>',
+                unsafe_allow_html=True,
+            )
+            seg_counts = df["segment"].value_counts()
+            seg_keys   = [s for s in SEGMENT_INFO if s in seg_counts.index]
 
-        for i in range(0, len(seg_keys), 2):
-            pair = seg_keys[i : i + 2]
-            cols = st.columns(len(pair))
-            for col_ui, seg in zip(cols, pair):
-                info  = SEGMENT_INFO[seg]
-                count = int(seg_counts.get(seg, 0))
-                pct   = count / total * 100
-                sub   = df[df["segment"] == seg]
-                avg_e_s = sub["engagement_score"].mean()
-                avg_c_s = sub["commercial_score"].mean()
-                avg_l_s = sub["loyalty_score"].mean()
+            for i in range(0, len(seg_keys), 2):
+                pair = seg_keys[i : i + 2]
+                cols = st.columns(len(pair))
+                for col_ui, seg in zip(cols, pair):
+                    info  = SEGMENT_INFO[seg]
+                    count = int(seg_counts.get(seg, 0))
+                    pct   = count / total * 100
+                    sub   = df[df["segment"] == seg]
+                    avg_e_s = sub["engagement_score"].mean()
+                    avg_c_s = sub["commercial_score"].mean()
+                    avg_l_s = sub["loyalty_score"].mean()
 
-                actions_html = "".join(
-                    f'<div style="font-size:9px;color:#9ca3af;margin-top:4px">→ {a}</div>'
-                    for a in info["actions"]
-                )
+                    actions_html = "".join(
+                        f'<div style="font-size:9px;color:#9ca3af;margin-top:4px">→ {a}</div>'
+                        for a in info["actions"]
+                    )
 
-                with col_ui:
-                    st.markdown(card(
-                        f'<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">'
-                        f'  <div>'
-                        f'    <span style="font-size:20px">{info["icon"]}</span>'
-                        f'    <span style="font-family:\'Syne\',sans-serif;font-size:15px;font-weight:700;'
-                        f'          color:{info["color"]};margin-left:8px">{seg}</span>'
-                        f'  </div>'
-                        f'  <span style="background:{info["bg"]};color:{info["color"]};'
-                        f'        border:1px solid {info["color"]};font-size:10px;padding:3px 10px;'
-                        f'        border-radius:8px">{count:,} fans · {pct:.0f}%</span>'
-                        f'</div>'
-                        f'<div style="font-size:10px;color:#6b7280;margin-bottom:8px">{info["description"]}</div>'
-                        f'<div style="display:flex;gap:16px;margin-bottom:10px">'
-                        f'  <div style="font-size:10px;color:#3d9cf0">E: {avg_e_s:.0f}</div>'
-                        f'  <div style="font-size:10px;color:#c8f135">C: {avg_c_s:.0f}</div>'
-                        f'  <div style="font-size:10px;color:#22c55e">L: {avg_l_s:.0f}</div>'
-                        f'</div>'
-                        f'<div style="font-size:10px;color:#9ca3af;border-left:2px solid {info["color"]};'
-                        f'     padding-left:8px;margin-bottom:8px">{info["recommendation"]}</div>'
-                        f'{actions_html}',
-                        bg="#0d1117", border=info["color"],
-                    ), unsafe_allow_html=True)
+                    with col_ui:
+                        st.markdown(card(
+                            f'<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">'
+                            f'  <div>'
+                            f'    <span style="font-size:20px">{info["icon"]}</span>'
+                            f'    <span style="font-family:\'Syne\',sans-serif;font-size:15px;font-weight:700;'
+                            f'          color:{info["color"]};margin-left:8px">{seg}</span>'
+                            f'  </div>'
+                            f'  <span style="background:{info["bg"]};color:{info["color"]};'
+                            f'        border:1px solid {info["color"]};font-size:10px;padding:3px 10px;'
+                            f'        border-radius:8px">{count:,} fans · {pct:.0f}%</span>'
+                            f'</div>'
+                            f'<div style="font-size:10px;color:#6b7280;margin-bottom:8px">{info["description"]}</div>'
+                            f'<div style="display:flex;gap:16px;margin-bottom:10px">'
+                            f'  <div style="font-size:10px;color:#3d9cf0">E: {avg_e_s:.0f}</div>'
+                            f'  <div style="font-size:10px;color:#c8f135">C: {avg_c_s:.0f}</div>'
+                            f'  <div style="font-size:10px;color:#22c55e">L: {avg_l_s:.0f}</div>'
+                            f'</div>'
+                            f'<div style="font-size:10px;color:#9ca3af;border-left:2px solid {info["color"]};'
+                            f'     padding-left:8px;margin-bottom:8px">{info["recommendation"]}</div>'
+                            f'{actions_html}',
+                            bg="#0d1117", border=info["color"],
+                        ), unsafe_allow_html=True)
 
-        # ── Top fans table ─────────────────────────────────────────────────────
-        st.markdown(
-            '<div style="font-family:\'Syne\',sans-serif;font-size:17px;font-weight:700;'
-            'color:#e5e7eb;margin:24px 0 14px">Top 20 Fans by Composite Score</div>',
-            unsafe_allow_html=True,
-        )
-        col_map_stored = st.session_state.get("col_map", {})
-        display_cols   = (
-            [col_map_stored["user_id"]] if "user_id" in col_map_stored else []
-        ) + [
-            c for c in ["age_group", "segment", "engagement_score", "commercial_score",
-                        "loyalty_score", "composite_score"]
-            if c in df.columns
-        ]
-        st.dataframe(
-            df.nlargest(20, "composite_score")[display_cols]
-              .reset_index(drop=True)
-              .style.background_gradient(subset=["composite_score"], cmap="RdYlGn"),
-            use_container_width=True,
-            height=420,
-        )
+            # ── Top fans table ─────────────────────────────────────────────────
+            st.markdown(
+                '<div style="font-family:\'Syne\',sans-serif;font-size:17px;font-weight:700;'
+                'color:#e5e7eb;margin:24px 0 14px">Top 20 Fans by Composite Score</div>',
+                unsafe_allow_html=True,
+            )
+            display_cols = (
+                [col_map_stored["user_id"]] if "user_id" in col_map_stored else []
+            ) + [
+                c for c in ["age_group", "segment", "engagement_score", "commercial_score",
+                            "loyalty_score", "composite_score"]
+                if c in df.columns
+            ]
+            st.dataframe(
+                df.nlargest(20, "composite_score")[display_cols]
+                  .reset_index(drop=True)
+                  .style.background_gradient(subset=["composite_score"], cmap="RdYlGn"),
+                use_container_width=True,
+                height=420,
+            )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -845,13 +1130,16 @@ with tab_report:
             'Upload a CSV in the Upload tab to generate the report.</div>'
         ), unsafe_allow_html=True)
     else:
-        df    = st.session_state["df_processed"]
-        total = len(df)
+        df        = st.session_state["df_processed"]
+        club_name = st.session_state.get("club_name", "").strip()
+        total     = len(df)
         today_str = datetime.today().strftime("%Y-%m-%d")
 
+        report_title = f"{club_name} Fan Segmentation Report" if club_name else "Fan Segmentation Report"
+
         st.markdown(
-            '<div style="font-family:\'Syne\',sans-serif;font-size:17px;font-weight:700;'
-            'color:#e5e7eb;margin-bottom:16px">Fan Segmentation Report</div>',
+            f'<div style="font-family:\'Syne\',sans-serif;font-size:17px;font-weight:700;'
+            f'color:#e5e7eb;margin-bottom:16px">{report_title}</div>',
             unsafe_allow_html=True,
         )
 
@@ -948,7 +1236,7 @@ with tab_report:
             'color:#e5e7eb;margin:20px 0 10px">Download</div>',
             unsafe_allow_html=True,
         )
-        dl1, dl2, dl3 = st.columns(3)
+        dl1, dl2, dl3, dl4 = st.columns(4)
         with dl1:
             st.download_button(
                 "⬇  Full fan data (CSV)",
@@ -969,4 +1257,12 @@ with tab_report:
                 data=to_csv_bytes(age_table),
                 file_name=f"footintel_age_{today_str}.csv",
                 mime="text/csv",
+            )
+        with dl4:
+            pdf_bytes = generate_pdf_report(df, club_name)
+            st.download_button(
+                "⬇  PDF Report",
+                data=pdf_bytes,
+                file_name=f"footintel_report_{today_str}.pdf",
+                mime="application/pdf",
             )
