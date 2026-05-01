@@ -620,6 +620,7 @@ def generate_pdf_report(df: pd.DataFrame, club_name: str) -> bytes:
 
     pdf = FPDF()
     pdf.add_page()
+    pdf.set_margins(10, 10, 10)
     pdf.set_auto_page_break(auto=True, margin=15)
 
     # Title block
@@ -717,9 +718,9 @@ def generate_pdf_report(df: pd.DataFrame, club_name: str) -> bytes:
         pdf.set_font("Helvetica", "B", 10)
         pdf.cell(0, 7, _pdf_safe(f"{seg}   ({count:,} fans  |  Risk: {info['risk']})"), ln=True)
         pdf.set_font("Helvetica", size=8)
-        pdf.multi_cell(0, 5, _pdf_safe(info["recommendation"]))
+        pdf.multi_cell(pdf.w - pdf.l_margin - pdf.r_margin, 5, _pdf_safe(info["recommendation"]))
         pdf.set_font("Helvetica", "I", 8)
-        pdf.multi_cell(0, 5, _pdf_safe("Actions: " + "  |  ".join(info["actions"])))
+        pdf.multi_cell(pdf.w - pdf.l_margin - pdf.r_margin, 5, _pdf_safe("Actions: " + "  |  ".join(info["actions"])))
         pdf.ln(2)
 
     # Footer
