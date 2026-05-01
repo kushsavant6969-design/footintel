@@ -1362,19 +1362,19 @@ with tab_dashboard:
 
             # ── Row 1 — donut + age bar ────────────────────────────────────────
             r1c1, r1c2 = st.columns(2)
-            with r1c1: st.plotly_chart(chart_segment_donut(df),   use_container_width=True, config={"displayModeBar": False})
-            with r1c2: st.plotly_chart(chart_age_segment_bar(df), use_container_width=True, config={"displayModeBar": False})
+            with r1c1: st.plotly_chart(chart_segment_donut(df),   use_container_width=True, config={"displayModeBar": False}, key="segment_donut")
+            with r1c2: st.plotly_chart(chart_age_segment_bar(df), use_container_width=True, config={"displayModeBar": False}, key="age_segment_bar")
 
             # ── Row 2 — scatter ────────────────────────────────────────────────
-            st.plotly_chart(chart_landscape(df), use_container_width=True, config={"displayModeBar": False})
+            st.plotly_chart(chart_landscape(df), use_container_width=True, config={"displayModeBar": False}, key="landscape")
 
             # ── Row 3 — scores + commercial ───────────────────────────────────
             r3c1, r3c2 = st.columns(2)
-            with r3c1: st.plotly_chart(chart_scores_by_segment(df),      use_container_width=True, config={"displayModeBar": False})
-            with r3c2: st.plotly_chart(chart_commercial_opportunity(df), use_container_width=True, config={"displayModeBar": False})
+            with r3c1: st.plotly_chart(chart_scores_by_segment(df),      use_container_width=True, config={"displayModeBar": False}, key="scores_by_segment")
+            with r3c2: st.plotly_chart(chart_commercial_opportunity(df), use_container_width=True, config={"displayModeBar": False}, key="commercial_opportunity")
 
             # ── Row 4 — age radar ──────────────────────────────────────────────
-            st.plotly_chart(chart_age_scores(df), use_container_width=True, config={"displayModeBar": False})
+            st.plotly_chart(chart_age_scores(df), use_container_width=True, config={"displayModeBar": False}, key="age_scores_radar")
 
             # ──────────────────────────────────────────────────────────────────
             # CHURN RISK PANEL
@@ -1413,7 +1413,7 @@ with tab_dashboard:
             with ck4: st.markdown(kpi("LOW Risk",        f"{cr_low:,}",  f"{cr_low/max(cr_tot,1)*100:.0f}% of filter",  "#22c55e"),             unsafe_allow_html=True)
 
             st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
-            st.plotly_chart(chart_churn_by_segment(df_cr), use_container_width=True, config={"displayModeBar": False})
+            st.plotly_chart(chart_churn_by_segment(df_cr), use_container_width=True, config={"displayModeBar": False}, key="churn_by_segment_panel")
 
             # High-risk fans table
             st.markdown(
@@ -1452,8 +1452,8 @@ with tab_dashboard:
             st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
             cop1, cop2 = st.columns(2)
-            with cop1: st.plotly_chart(chart_journey_stage_funnel(df),    use_container_width=True, config={"displayModeBar": False})
-            with cop2: st.plotly_chart(chart_conversion_by_stage(df),     use_container_width=True, config={"displayModeBar": False})
+            with cop1: st.plotly_chart(chart_journey_stage_funnel(df),    use_container_width=True, config={"displayModeBar": False}, key="journey_stage_funnel")
+            with cop2: st.plotly_chart(chart_conversion_by_stage(df),     use_container_width=True, config={"displayModeBar": False}, key="conversion_by_stage")
 
             # Top conversion candidates table
             st.markdown(
@@ -1493,7 +1493,7 @@ with tab_dashboard:
                     st.markdown(kpi(f"{ch} Preferred", f"{cnt:,}", f"{cnt/ch_total*100:.0f}% of fans", color), unsafe_allow_html=True)
 
             st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
-            st.plotly_chart(chart_channel_preference(df), use_container_width=True, config={"displayModeBar": False})
+            st.plotly_chart(chart_channel_preference(df), use_container_width=True, config={"displayModeBar": False}, key="channel_preference_dashboard")
 
             # ──────────────────────────────────────────────────────────────────
             # SEGMENT INSIGHT CARDS
@@ -1622,7 +1622,7 @@ with tab_report:
             )
             st.dataframe(churn_tbl, use_container_width=True, hide_index=True)
         with r1c2:
-            st.plotly_chart(chart_churn_by_segment(df), use_container_width=True, config={"displayModeBar": False})
+            st.plotly_chart(chart_churn_by_segment(df), use_container_width=True, config={"displayModeBar": False}, key="churn_by_segment_report")
 
         # Conversion opportunity summary
         st.markdown('<div style="font-family:\'Syne\',sans-serif;font-size:14px;font-weight:700;color:#e5e7eb;margin:16px 0 8px">Conversion Opportunity Summary</div>', unsafe_allow_html=True)
@@ -1635,7 +1635,7 @@ with tab_report:
             stage_tbl.columns = ["Journey Stage", "Fan Count", "Avg Conv. Prob"]
             st.dataframe(stage_tbl, use_container_width=True, hide_index=True)
         with r2c2:
-            st.plotly_chart(chart_journey_stage_funnel(df), use_container_width=True, config={"displayModeBar": False})
+            st.plotly_chart(chart_journey_stage_funnel(df), use_container_width=True, config={"displayModeBar": False}, key="journey_stage_report")
 
         # Channel preference breakdown
         st.markdown('<div style="font-family:\'Syne\',sans-serif;font-size:14px;font-weight:700;color:#e5e7eb;margin:16px 0 8px">Channel Preference Breakdown</div>', unsafe_allow_html=True)
@@ -1645,7 +1645,7 @@ with tab_report:
             ch_tbl["Pct"] = (ch_tbl["Fan_Count"] / total * 100).round(1)
             st.dataframe(ch_tbl, use_container_width=True, hide_index=True)
         with r3c2:
-            st.plotly_chart(chart_channel_preference(df), use_container_width=True, config={"displayModeBar": False})
+            st.plotly_chart(chart_channel_preference(df), use_container_width=True, config={"displayModeBar": False}, key="channel_preference_report")
 
         # Age breakdown
         st.markdown('<div style="font-family:\'Syne\',sans-serif;font-size:14px;font-weight:700;color:#e5e7eb;margin:16px 0 8px">Age Group Breakdown</div>', unsafe_allow_html=True)
