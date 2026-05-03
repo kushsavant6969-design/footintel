@@ -165,6 +165,36 @@ JOURNEY_STAGE_ORDER = [
 ]
 JOURNEY_STAGE_COLORS = ["#4b5563", "#f59e0b", "#3d9cf0", "#22c55e", "#c8f135"]
 
+# ── Hybrid schema — core columns required for full dashboard ──────────────────
+CORE_COLUMNS = {
+    "email_opens", "email_clicks", "email_campaigns_received",
+    "inapp_opens", "inapp_clicks", "inapp_campaigns_received",
+    "article_views", "ticket_purchases", "membership_purchases",
+    "retail_purchases", "total_revenue", "last_purchase_date",
+    "last_app_open", "last_email_open", "join_date",
+    "membership_category", "fan_type", "has_app",
+}
+
+# ISO alpha-3 country map for acquisition choropleth
+COUNTRY_ISO: dict[str, str] = {
+    "England": "GBR", "Scotland": "GBR", "Wales": "GBR", "Great Britain": "GBR",
+    "United Kingdom": "GBR", "UK": "GBR",
+    "Ireland": "IRL", "Northern Ireland": "IRL",
+    "USA": "USA", "United States": "USA",
+    "Germany": "DEU", "Spain": "ESP", "France": "FRA", "Italy": "ITA",
+    "Netherlands": "NLD", "Belgium": "BEL", "Portugal": "PRT",
+    "Sweden": "SWE", "Norway": "NOR", "Denmark": "DNK",
+    "Brazil": "BRA", "Argentina": "ARG", "Mexico": "MEX",
+    "Australia": "AUS", "Canada": "CAN", "Japan": "JPN",
+    "South Korea": "KOR", "China": "CHN", "India": "IND",
+}
+
+SYNTHETIC_PLAYERS = [
+    "Beth Mead", "Lauren Hemp", "Vivianne Miedema", "Sam Kerr",
+    "Millie Bright", "Keira Walsh", "Lucy Bronze", "Alessia Russo",
+    "Chloe Kelly", "Fran Kirby",
+]
+
 AGE_GROUPS = [
     ("Child",       0,  12),
     ("Young Adult", 13, 25),
@@ -213,6 +243,28 @@ def section_heading(text: str) -> None:
         f'<div style="font-family:\'Syne\',sans-serif;font-size:17px;font-weight:700;'
         f'color:#e5e7eb;margin:28px 0 14px">{text}</div>',
         unsafe_allow_html=True,
+    )
+
+
+def get_upload_state(col_map: dict) -> tuple[str, set]:
+    """Returns ('full'|'partial'|'custom', set_of_missing_core_columns)."""
+    missing = CORE_COLUMNS - set(col_map.keys())
+    matched = CORE_COLUMNS & set(col_map.keys())
+    if not missing:
+        return "full", set()
+    if len(matched) >= 5:
+        return "partial", missing
+    return "custom", missing
+
+
+def grayed_kpi(label: str, missing_col: str) -> str:
+    tip = f"Add {missing_col} to unlock this metric."
+    return (
+        f'<div style="background:#0d1117;border:1px dashed #374151;border-radius:10px;padding:18px 20px;">'
+        f'<div style="font-size:10px;color:#374151;text-transform:uppercase;letter-spacing:.1em;margin-bottom:8px">{label}</div>'
+        f'<div style="font-size:26px;color:#2a2f3d">— —</div>'
+        f'<div style="font-size:10px;color:#374151;margin-top:6px" title="{tip}">⚠ {tip}</div>'
+        f'</div>'
     )
 
 
@@ -908,6 +960,21 @@ def to_csv_bytes(df: pd.DataFrame) -> bytes:
     return buf.getvalue()
 
 
+def generate_csv_template() -> bytes:
+    headers = [
+        "User_ID", "Age", "Gender", "Country", "Membership_Category", "Fan_Type", "HAS_APP",
+        "Email_Opens", "Email_Clicks", "Email_Campaigns_Received",
+        "InApp_Opens", "InApp_Clicks", "InApp_Campaigns_Received", "Article_Views",
+        "Ticket_Purchases", "Membership_Purchases", "Retail_Purchases", "Total_Revenue",
+        "First_Purchase_Date", "Last_Purchase_Date", "First_App_Open", "Last_App_Open",
+        "First_Email_Open", "Last_Email_Open", "First_Article_View", "Last_Article_View",
+        "Join_Date",
+    ]
+    buf = io.StringIO()
+    buf.write(",".join(headers) + "\n")
+    return buf.getvalue().encode()
+
+
 def segment_summary(df: pd.DataFrame) -> pd.DataFrame:
     total = len(df)
     s = (
@@ -1107,6 +1174,579 @@ def generate_pdf_report(df: pd.DataFrame, club_name: str) -> bytes:
     return bytes(pdf.output())
 
 
+# ── Fan Acquisition functions ─────────────────────────────────────────────────
+
+def compute_acquisition_data(df: pd.DataFrame, col_map: dict) -> pd.DataFrame:
+    if "country" not in col_map:
+        return pd.DataFrame()
+    country_col = col_map["country"]
+    grp = df.groupby(country_col).agg(
+        fan_count=("engagement_score", "count"),
+        avg_engagement=("engagement_score", "mean"),
+        avg_commercial=("commercial_score", "mean"),
+        avg_loyalty=("loyalty_score", "mean"),
+    ).reset_index()
+    grp.columns = ["country", "fan_count", "avg_engagement", "avg_commercial", "avg_loyalty"]
+    total = grp["fan_count"].sum()
+    grp["fan_share"] = grp["fan_count"] / total * 100
+    grp["growth_headroom"] = (100 - grp["fan_share"]).clip(0, 100)
+    grp["acquisition_score"] = (
+        grp["avg_engagement"] * 0.30 +
+        grp["avg_commercial"] * 0.30 +
+        grp["growth_headroom"] * 0.40
+    ).round(1)
+    grp["iso"] = grp["country"].map(COUNTRY_ISO)
+    return grp.sort_values("acquisition_score", ascending=False).reset_index(drop=True)
+
+
+def chart_acquisition_map(acq_df: pd.DataFrame) -> go.Figure:
+    map_data = acq_df[acq_df["iso"].notna()].groupby("iso").agg(
+        acquisition_score=("acquisition_score", "max"),
+        country=("country", "first"),
+    ).reset_index()
+    fig = go.Figure(go.Choropleth(
+        locations=map_data["iso"],
+        z=map_data["acquisition_score"],
+        text=map_data["country"],
+        colorscale="Viridis",
+        zmin=0, zmax=100,
+        colorbar=dict(
+            title="Priority Score", thickness=12, len=0.75,
+            tickfont=dict(size=9, color="#9ca3af"),
+            title_font=dict(color="#9ca3af"),
+        ),
+        hovertemplate="<b>%{text}</b><br>Priority Score: %{z:.1f}<extra></extra>",
+        marker_line_color="#1f2937",
+    ))
+    fig.update_layout(
+        **PLOTLY_BASE, height=380,
+        title=dict(text="Fan Acquisition Opportunity Map", x=0.02, y=0.97),
+        geo=dict(
+            bgcolor="#0d1117", landcolor="#13161d",
+            coastlinecolor="#2a2f3d", countrycolor="#2a2f3d",
+            showframe=False, showcoastlines=True,
+            projection_type="natural earth",
+        ),
+        margin=dict(l=0, r=0, t=44, b=0),
+    )
+    return fig
+
+
+def chart_acquisition_priority_bar(acq_df: pd.DataFrame) -> go.Figure:
+    d = acq_df[~acq_df["country"].isin(["Other"])].sort_values("acquisition_score")
+    colors = ["#c8f135" if s >= 70 else "#f59e0b" if s >= 50 else "#3d9cf0" for s in d["acquisition_score"]]
+    fig = go.Figure(go.Bar(
+        x=d["acquisition_score"], y=d["country"], orientation="h",
+        marker_color=colors,
+        text=d["acquisition_score"].round(1), textposition="outside", textfont_size=9,
+        hovertemplate="<b>%{y}</b><br>Acquisition Score: %{x:.1f}<extra></extra>",
+    ))
+    fig.update_layout(
+        **PLOTLY_BASE, height=320,
+        title=dict(text="Acquisition Priority Score by Region (0–100)", x=0.02, y=0.97),
+        xaxis=dict(range=[0, 115], gridcolor="#1f2937"),
+        yaxis=dict(gridcolor="#1f2937"),
+    )
+    return fig
+
+
+def chart_acquisition_landscape(acq_df: pd.DataFrame) -> go.Figure:
+    d = acq_df[~acq_df["country"].isin(["Other"])].copy()
+    if d.empty:
+        return go.Figure()
+    size = (d["fan_count"] / d["fan_count"].max() * 30 + 10).clip(10, 40)
+    fig = go.Figure(go.Scatter(
+        x=d["avg_engagement"], y=d["avg_commercial"],
+        mode="markers+text", text=d["country"],
+        textposition="top center",
+        textfont=dict(size=9, color="#9ca3af"),
+        marker=dict(
+            size=size, color=d["acquisition_score"],
+            colorscale="Viridis", showscale=True,
+            colorbar=dict(title="Priority Score", thickness=10, len=0.75, tickfont_size=8),
+        ),
+        hovertemplate="<b>%{text}</b><br>Engagement: %{x:.1f}  Commercial: %{y:.1f}<extra></extra>",
+    ))
+    fig.add_hline(y=d["avg_commercial"].mean(), line_dash="dash", line_color="#2a2f3d", line_width=1)
+    fig.add_vline(x=d["avg_engagement"].mean(), line_dash="dash", line_color="#2a2f3d", line_width=1)
+    fig.update_layout(
+        **PLOTLY_BASE, height=360,
+        title=dict(text="Market Landscape — Engagement × Commercial  (size = fan count, colour = priority)", x=0.02, y=0.97),
+        xaxis=dict(title="Avg Engagement Score", gridcolor="#1f2937"),
+        yaxis=dict(title="Avg Commercial Score", gridcolor="#1f2937"),
+    )
+    return fig
+
+
+def chart_demographic_gaps(df: pd.DataFrame) -> go.Figure:
+    ag = df.groupby("age_group").agg(
+        count=("composite_score", "count"),
+        avg_commercial=("commercial_score", "mean"),
+    ).reindex(["Child", "Young Adult", "Adult", "Senior"], fill_value=0).reset_index()
+    total = ag["count"].sum()
+    ag["share_pct"] = (ag["count"] / max(total, 1) * 100).round(1)
+    colors_ag = ["#a78bfa", "#3d9cf0", "#c8f135", "#22c55e"]
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        name="Fan Share %", x=ag["age_group"], y=ag["share_pct"],
+        marker_color=colors_ag, opacity=0.6, yaxis="y1",
+    ))
+    fig.add_trace(go.Scatter(
+        name="Avg Commercial Score", x=ag["age_group"], y=ag["avg_commercial"].round(1),
+        mode="lines+markers",
+        line=dict(color="#c8f135", width=2), marker=dict(size=8, color="#c8f135"),
+        yaxis="y2",
+    ))
+    fig.update_layout(
+        **PLOTLY_BASE, height=320,
+        title=dict(text="Demographic Gaps — Fan Share vs. Commercial Value", x=0.02, y=0.97),
+        yaxis=dict(title="Fan Share %", gridcolor="#1f2937"),
+        yaxis2=dict(title="Avg Commercial Score", overlaying="y", side="right", showgrid=False),
+        legend=dict(bgcolor="#13161d", bordercolor="#1f2937", borderwidth=1, font_size=10),
+    )
+    return fig
+
+
+# ── Player Intelligence functions ─────────────────────────────────────────────
+
+def assign_synthetic_players(df: pd.DataFrame) -> pd.DataFrame:
+    rng = np.random.default_rng(77)
+    seg_weights = {
+        "Loyal Fans":     [0.20, 0.15, 0.20, 0.10, 0.10, 0.05, 0.05, 0.05, 0.05, 0.05],
+        "High Potential": [0.15, 0.20, 0.10, 0.15, 0.05, 0.10, 0.05, 0.10, 0.05, 0.05],
+        "Win Back":       [0.10, 0.10, 0.15, 0.10, 0.15, 0.10, 0.10, 0.05, 0.10, 0.05],
+        "Dormant":        [0.10, 0.08, 0.10, 0.12, 0.12, 0.12, 0.12, 0.08, 0.08, 0.08],
+        "Casual":         [0.10, 0.12, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.09, 0.09],
+    }
+    players = []
+    for _, row in df.iterrows():
+        w = seg_weights.get(row["segment"], [1/10]*10)
+        players.append(rng.choice(SYNTHETIC_PLAYERS, p=w))
+    out = df.copy()
+    out["_player"] = players
+    return out
+
+
+def compute_player_scores(df_p: pd.DataFrame) -> pd.DataFrame:
+    stats = df_p.groupby("_player").agg(
+        fan_count=("composite_score", "count"),
+        avg_engagement=("engagement_score", "mean"),
+        avg_commercial=("commercial_score", "mean"),
+        avg_loyalty=("loyalty_score", "mean"),
+        loyal_fan_pct=("segment", lambda x: (x == "Loyal Fans").mean() * 100),
+        high_potential_pct=("segment", lambda x: (x == "High Potential").mean() * 100),
+        avg_conversion=("conversion_probability", "mean"),
+    ).round(1).reset_index()
+    stats.columns = ["player", "fan_count", "avg_engagement", "avg_commercial",
+                     "avg_loyalty", "loyal_fan_pct", "high_potential_pct", "avg_conversion"]
+    stats["commercial_value_score"] = (
+        stats["avg_engagement"] * 0.30 +
+        stats["avg_commercial"] * 0.30 +
+        stats["loyal_fan_pct"] * 0.20 +
+        stats["avg_conversion"] * 0.20
+    ).round(1)
+    return stats.sort_values("commercial_value_score", ascending=False).reset_index(drop=True)
+
+
+def chart_player_value_bar(player_df: pd.DataFrame) -> go.Figure:
+    d = player_df.sort_values("commercial_value_score")
+    colors = ["#c8f135" if s >= 70 else "#22c55e" if s >= 55 else "#3d9cf0" for s in d["commercial_value_score"]]
+    fig = go.Figure(go.Bar(
+        x=d["commercial_value_score"], y=d["player"], orientation="h",
+        marker_color=colors,
+        text=d["commercial_value_score"].round(1), textposition="outside", textfont_size=9,
+        hovertemplate="<b>%{y}</b><br>Commercial Value Score: %{x:.1f}<extra></extra>",
+    ))
+    fig.update_layout(
+        **PLOTLY_BASE, height=340,
+        title=dict(text="Player Commercial Value Score (0–100)", x=0.02, y=0.97),
+        xaxis=dict(range=[0, 115], gridcolor="#1f2937"),
+        yaxis=dict(gridcolor="#1f2937"),
+    )
+    return fig
+
+
+def chart_player_affinity_heatmap(df_p: pd.DataFrame) -> go.Figure:
+    pivot = df_p.groupby(["_player", "segment"])["engagement_score"].mean().unstack(fill_value=0).round(1)
+    fig = go.Figure(go.Heatmap(
+        z=pivot.values, x=pivot.columns.tolist(), y=pivot.index.tolist(),
+        colorscale="Viridis",
+        text=pivot.values.round(1), texttemplate="%{text}", textfont=dict(size=9),
+        hovertemplate="<b>%{y} → %{x}</b><br>Avg Engagement: %{z:.1f}<extra></extra>",
+        colorbar=dict(title="Avg Engagement", thickness=10, tickfont_size=8),
+    ))
+    fig.update_layout(
+        **PLOTLY_BASE, height=360,
+        title=dict(text="Player–Fan Affinity Matrix (avg engagement score per segment)", x=0.02, y=0.97),
+    )
+    return fig
+
+
+# ── Sponsorship Intelligence functions ────────────────────────────────────────
+
+def compute_sponsorship_pitch_score(df: pd.DataFrame) -> float:
+    loyal_pct    = (df["segment"] == "Loyal Fans").mean() * 100
+    high_pot_pct = (df["segment"] == "High Potential").mean() * 100
+    avg_c        = df["commercial_score"].mean()
+    avg_e        = df["engagement_score"].mean()
+    low_churn    = (df["churn_risk_label"] == "LOW").mean() * 100
+    return round(min(
+        avg_c * 0.35 + avg_e * 0.25 + loyal_pct * 0.20 + high_pot_pct * 0.10 + low_churn * 0.10,
+        100,
+    ), 1)
+
+
+def get_sponsor_recommendations(df: pd.DataFrame, col_map: dict) -> list[dict]:
+    recs = []
+    if "age" in col_map:
+        ages = pd.to_numeric(df[col_map["age"]], errors="coerce").dropna()
+        young_pct = (ages < 30).mean() * 100
+        mid_pct   = ((ages >= 30) & (ages < 50)).mean() * 100
+        if young_pct >= 35:
+            recs.append({"category": "Gaming & Esports", "fit": "HIGH",
+                "reason": f"{young_pct:.0f}% of fanbase is under 30",
+                "examples": "EA Sports, Twitch, Epic Games, PlayStation"})
+            recs.append({"category": "Energy Drinks & Nutrition", "fit": "HIGH",
+                "reason": "Young, active fanbase — high affinity for performance brands",
+                "examples": "Red Bull, Monster, Lucozade, Grenade"})
+        if mid_pct >= 30:
+            recs.append({"category": "Financial Services", "fit": "HIGH",
+                "reason": f"{mid_pct:.0f}% of fanbase is 30–50 — prime financial demographic",
+                "examples": "Halifax, Revolut, AXA, Barclays"})
+    avg_c = df["commercial_score"].mean()
+    if avg_c >= 45:
+        recs.append({"category": "Premium Sportswear", "fit": "HIGH",
+            "reason": f"High commercial score ({avg_c:.0f}/100) — strong purchase intent",
+            "examples": "Nike, Adidas, New Balance, Umbro"})
+    loyal_pct = (df["segment"] == "Loyal Fans").mean() * 100
+    if loyal_pct >= 12:
+        recs.append({"category": "Travel & Hospitality", "fit": "MED",
+            "reason": f"{loyal_pct:.0f}% Loyal Fans — premium audience for travel brands",
+            "examples": "Expedia, Marriott, Hilton, National Express"})
+    recs.append({"category": "Streaming & Entertainment", "fit": "MED",
+        "reason": "Sports fans over-index on streaming platform subscriptions",
+        "examples": "Amazon Prime, DAZN, Sky Sports, TNT Sports"})
+    return recs[:5]
+
+
+def chart_sponsor_age_donut(df: pd.DataFrame) -> go.Figure:
+    ag = df["age_group"].value_counts().reindex(["Child", "Young Adult", "Adult", "Senior"], fill_value=0)
+    fig = go.Figure(go.Pie(
+        labels=ag.index, values=ag.values, hole=0.55,
+        marker_colors=["#a78bfa", "#3d9cf0", "#c8f135", "#22c55e"],
+        textfont_size=10,
+        hovertemplate="<b>%{label}</b><br>%{value} fans (%{percent})<extra></extra>",
+    ))
+    fig.update_layout(
+        **PLOTLY_BASE, height=300,
+        title=dict(text="Fan Age Distribution", x=0.02, y=0.97),
+        legend=dict(bgcolor="#13161d", bordercolor="#1f2937", borderwidth=1, font_size=10),
+    )
+    return fig
+
+
+def chart_sponsor_commercial_dist(df: pd.DataFrame) -> go.Figure:
+    fig = go.Figure(go.Histogram(
+        x=df["commercial_score"], nbinsx=20,
+        marker_color="#c8f135", opacity=0.8,
+        hovertemplate="Score ~%{x:.0f}<br>Fans: %{y}<extra></extra>",
+    ))
+    avg_c = df["commercial_score"].mean()
+    fig.add_vline(x=avg_c, line_dash="dash", line_color="#ef4444",
+                  annotation_text=f"Avg: {avg_c:.1f}",
+                  annotation_font=dict(size=9, color="#ef4444"))
+    fig.update_layout(
+        **PLOTLY_BASE, height=280,
+        title=dict(text="Commercial Score Distribution — Audience Quality for Sponsors", x=0.02, y=0.97),
+        xaxis=dict(title="Commercial Score", gridcolor="#1f2937"),
+        yaxis=dict(title="Fans", gridcolor="#1f2937"),
+    )
+    return fig
+
+
+def chart_sponsor_segment_value(df: pd.DataFrame) -> go.Figure:
+    seg_s = df.groupby("segment").agg(
+        fans=("composite_score", "count"),
+        avg_commercial=("commercial_score", "mean"),
+        avg_engagement=("engagement_score", "mean"),
+    ).round(1).reset_index().sort_values("avg_commercial", ascending=True)
+    colors = _seg_colors(seg_s["segment"])
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        name="Avg Commercial", x=seg_s["avg_commercial"], y=seg_s["segment"],
+        orientation="h", marker_color=colors, opacity=0.9,
+        text=seg_s["fans"].apply(lambda v: f"{v:,} fans"), textposition="outside", textfont_size=9,
+    ))
+    fig.update_layout(
+        **PLOTLY_BASE, height=300,
+        title=dict(text="Audience Quality by Segment — Commercial Score", x=0.02, y=0.97),
+        xaxis=dict(range=[0, 115], title="Avg Commercial Score", gridcolor="#1f2937"),
+        yaxis=dict(gridcolor="#1f2937"),
+    )
+    return fig
+
+
+def generate_sponsor_pdf(df: pd.DataFrame, club_name: str) -> bytes:
+    from fpdf import FPDF
+    today_str   = datetime.today().strftime("%Y-%m-%d")
+    total       = len(df)
+    pitch_score = compute_sponsorship_pitch_score(df)
+    loyal_pct   = (df["segment"] == "Loyal Fans").mean() * 100
+    hp_pct      = (df["segment"] == "High Potential").mean() * 100
+    avg_c       = df["commercial_score"].mean()
+    avg_e       = df["engagement_score"].mean()
+    low_churn   = (df["churn_risk_label"] == "LOW").mean() * 100
+
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_margins(12, 12, 12)
+    pdf.set_auto_page_break(auto=True, margin=15)
+    ew = pdf.w - pdf.l_margin - pdf.r_margin
+
+    pdf.set_font("Helvetica", "B", 20)
+    pdf.cell(0, 12, _pdf_safe(f"{club_name} — Sponsorship Intelligence Deck" if club_name else "Sponsorship Intelligence Deck"), ln=True, align="C")
+    pdf.set_font("Helvetica", size=9)
+    pdf.set_text_color(130, 130, 130)
+    pdf.cell(0, 6, f"Generated by FootIntel  |  {today_str}  |  {total:,} fans analysed", ln=True, align="C")
+    pdf.set_text_color(0, 0, 0)
+    pdf.ln(4)
+    pdf.set_font("Helvetica", "B", 14)
+    score_label = "Excellent" if pitch_score >= 75 else "Good" if pitch_score >= 55 else "Developing"
+    pdf.cell(0, 8, f"Sponsorship Pitch Score: {pitch_score}/100  —  {score_label}", ln=True, align="C")
+    pdf.ln(4)
+    pdf.line(12, pdf.get_y(), 198, pdf.get_y())
+    pdf.ln(6)
+
+    pdf.set_font("Helvetica", "B", 12)
+    pdf.cell(0, 8, "Audience Summary", ln=True)
+    pdf.set_font("Helvetica", size=10)
+    for line in [
+        f"Total Fanbase:              {total:,} fans",
+        f"Loyal Fans (premium):       {loyal_pct:.0f}% — committed, high-spend audience",
+        f"High Potential:             {hp_pct:.0f}% — engaged, conversion-ready",
+        f"Low Churn Risk:             {low_churn:.0f}% — stable, long-term audience",
+        f"Avg Engagement Score:       {avg_e:.1f}/100",
+        f"Avg Commercial Score:       {avg_c:.1f}/100 (purchase propensity indicator)",
+    ]:
+        pdf.cell(0, 6, _pdf_safe(line), ln=True)
+    pdf.ln(4)
+
+    pdf.set_font("Helvetica", "B", 12)
+    pdf.cell(0, 8, "Audience Quality by Segment", ln=True)
+    seg_s = df.groupby("segment").agg(count=("composite_score","count"), avg_e=("engagement_score","mean"), avg_c=("commercial_score","mean")).round(1).reset_index()
+    cw = [50, 22, 28, 28]
+    hdrs = ["Segment", "Fans", "Avg Eng.", "Avg Com."]
+    pdf.set_font("Helvetica", "B", 9)
+    pdf.set_fill_color(230, 230, 230)
+    for i, h in enumerate(hdrs):
+        pdf.cell(cw[i], 7, h, border=1, fill=True, align="C")
+    pdf.ln()
+    pdf.set_font("Helvetica", size=9)
+    for _, row in seg_s.iterrows():
+        pdf.cell(cw[0], 6, _pdf_safe(str(row["segment"])), border=1)
+        pdf.cell(cw[1], 6, str(int(row["count"])), border=1, align="C")
+        pdf.cell(cw[2], 6, f"{row['avg_e']:.1f}", border=1, align="C")
+        pdf.cell(cw[3], 6, f"{row['avg_c']:.1f}", border=1, align="C")
+        pdf.ln()
+    pdf.ln(5)
+
+    pdf.set_font("Helvetica", "B", 12)
+    pdf.cell(0, 8, "Key Demographics", ln=True)
+    pdf.set_font("Helvetica", size=10)
+    ag = df["age_group"].value_counts()
+    for g in ["Child", "Young Adult", "Adult", "Senior"]:
+        cnt = int(ag.get(g, 0))
+        pdf.cell(0, 6, _pdf_safe(f"  {g}:  {cnt:,}  ({cnt/total*100:.0f}%)"), ln=True)
+    pdf.ln(4)
+
+    pdf.set_font("Helvetica", "B", 12)
+    pdf.cell(0, 8, "Top Sponsor Category Recommendations", ln=True)
+    pdf.set_font("Helvetica", size=9)
+    for r in get_sponsor_recommendations(df, {}):
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.cell(0, 7, _pdf_safe(f"{r['category']}  [{r['fit']}]"), ln=True)
+        pdf.set_font("Helvetica", size=9)
+        pdf.multi_cell(ew, 5, _pdf_safe(f"  {r['reason']}"))
+        pdf.multi_cell(ew, 5, _pdf_safe(f"  Examples: {r['examples']}"))
+        pdf.ln(2)
+
+    pdf.set_y(-15)
+    pdf.set_font("Helvetica", "I", 8)
+    pdf.set_text_color(150, 150, 150)
+    pdf.cell(0, 10, f"FootIntel  |  {today_str}  |  CONFIDENTIAL — NOT FOR DISTRIBUTION", align="C")
+    return bytes(pdf.output())
+
+
+# ── Matchday Intelligence functions ───────────────────────────────────────────
+
+_SEGMENT_MATCHDAY_SPEND = {
+    "Loyal Fans": 85.0, "High Potential": 48.0,
+    "Casual": 28.0, "Win Back": 15.0, "Dormant": 6.0,
+}
+
+
+def compute_matchday_data(df: pd.DataFrame, col_map: dict) -> dict:
+    df_md = df.copy()
+    df_md["matchday_spend_est"] = (
+        df_md["segment"].map(_SEGMENT_MATCHDAY_SPEND).fillna(20.0)
+        * (df_md["commercial_score"] / 50).clip(0.3, 2.0)
+    ).round(2)
+
+    if "ticket_purchases" in col_map:
+        tix = pd.to_numeric(df[col_map["ticket_purchases"]], errors="coerce").fillna(0)
+        hosp_mask = df_md["segment"].isin(["Loyal Fans", "High Potential"]) & (tix == 0)
+    else:
+        hosp_mask = df_md["segment"] == "High Potential"
+
+    hospitality_targets = df_md[hosp_mask].nlargest(20, "conversion_probability")
+
+    rev_by_seg = df_md.groupby("segment").agg(
+        fan_count=("matchday_spend_est", "count"),
+        total_est_revenue=("matchday_spend_est", "sum"),
+        avg_spend=("matchday_spend_est", "mean"),
+    ).round(2).reset_index()
+
+    ch = df_md["channel_preference"].value_counts()
+    both = int(ch.get("Both", 0))
+    windows = {
+        "Pre-match (Email / Push)": int(ch.get("Email", 0) + both // 2),
+        "During Match (App)":       int(ch.get("App", 0) + both // 2),
+        "Post-match (Content)":     int(len(df_md) * 0.72),
+    }
+
+    hp_count = int((df_md["segment"] == "High Potential").sum())
+    return {
+        "df_md": df_md,
+        "rev_by_seg": rev_by_seg,
+        "hospitality_targets": hospitality_targets,
+        "windows": windows,
+        "hp_count": hp_count,
+        "hp_avg_spend": _SEGMENT_MATCHDAY_SPEND["High Potential"],
+        "total_est_revenue": df_md["matchday_spend_est"].sum(),
+    }
+
+
+def chart_matchday_revenue_by_segment(rev_df: pd.DataFrame) -> go.Figure:
+    d = rev_df.sort_values("total_est_revenue")
+    fig = go.Figure(go.Bar(
+        x=d["total_est_revenue"].round(0), y=d["segment"], orientation="h",
+        marker_color=_seg_colors(d["segment"]),
+        text=["£" + f"{v:,.0f}" for v in d["total_est_revenue"]],
+        textposition="outside", textfont_size=9,
+        hovertemplate="<b>%{y}</b><br>Est. Revenue: £%{x:,.0f}<extra></extra>",
+    ))
+    fig.update_layout(
+        **PLOTLY_BASE, height=320,
+        title=dict(text="Estimated Matchday Revenue by Segment", x=0.02, y=0.97),
+        xaxis=dict(title="Estimated Revenue (£)", gridcolor="#1f2937"),
+        yaxis=dict(gridcolor="#1f2937"),
+    )
+    return fig
+
+
+def chart_engagement_windows(windows: dict) -> go.Figure:
+    labels, values = list(windows.keys()), list(windows.values())
+    fig = go.Figure(go.Bar(
+        x=labels, y=values,
+        marker_color=["#3d9cf0", "#c8f135", "#22c55e"],
+        text=values, textposition="outside", textfont_size=10,
+        hovertemplate="<b>%{x}</b><br>Active fans: %{y:,}<extra></extra>",
+    ))
+    fig.update_layout(
+        **PLOTLY_BASE, height=280,
+        title=dict(text="Fan Engagement Windows — Matchday Activity Estimate", x=0.02, y=0.97),
+        xaxis=dict(gridcolor="#1f2937"),
+        yaxis=dict(title="Estimated Active Fans", gridcolor="#1f2937"),
+    )
+    return fig
+
+
+def chart_matchday_avg_spend(rev_df: pd.DataFrame) -> go.Figure:
+    d = rev_df.sort_values("avg_spend")
+    fig = go.Figure(go.Bar(
+        x=d["avg_spend"].round(2), y=d["segment"], orientation="h",
+        marker_color=_seg_colors(d["segment"]),
+        text=["£" + f"{v:.0f}" for v in d["avg_spend"]],
+        textposition="outside", textfont_size=9,
+        hovertemplate="<b>%{y}</b><br>Avg spend per fan: £%{x:.2f}<extra></extra>",
+    ))
+    fig.update_layout(
+        **PLOTLY_BASE, height=320,
+        title=dict(text="Avg Estimated Spend per Fan on Matchday", x=0.02, y=0.97),
+        xaxis=dict(title="Avg Spend (£)", gridcolor="#1f2937"),
+        yaxis=dict(gridcolor="#1f2937"),
+    )
+    return fig
+
+
+# ── Custom Metrics Explorer ───────────────────────────────────────────────────
+
+def render_custom_metrics_explorer(df: pd.DataFrame, col_map: dict) -> None:
+    mapped_csv = set(col_map.values())
+    extra = [c for c in df.columns if c not in mapped_csv and not c.startswith("_")]
+    # also exclude computed columns
+    computed = {"engagement_score","commercial_score","loyalty_score","churn_risk_index",
+                "churn_risk_label","conversion_probability","channel_preference",
+                "journey_stage","composite_score","segment","age_group","recency_days",
+                "tenure_days","_membership_tier"}
+    extra = [c for c in extra if c not in computed]
+
+    if not extra:
+        st.info("No extra columns detected beyond the mapped fields.")
+        return
+
+    section_heading("Custom Metrics Explorer")
+    st.markdown(card(
+        '<div style="font-size:11px;color:#9ca3af">Extra columns from your CSV that are not part of the standard '
+        'mapping. Numeric columns show distributions and correlation with composite score. '
+        'Categorical columns show segment breakdowns.</div>'
+    ), unsafe_allow_html=True)
+
+    for col_name in extra[:8]:
+        col_data = df[col_name].dropna()
+        if len(col_data) == 0:
+            continue
+        numeric_frac = pd.to_numeric(col_data, errors="coerce").notna().mean()
+        if numeric_frac > 0.8:
+            num_data = pd.to_numeric(df[col_name], errors="coerce").dropna()
+            corr_txt = ""
+            if "composite_score" in df.columns:
+                corr = num_data.corr(df["composite_score"].reindex(num_data.index))
+                if not np.isnan(corr):
+                    corr_txt = f"  |  Corr. with composite: {corr:+.2f}"
+            fig = go.Figure(go.Histogram(x=num_data, nbinsx=20, marker_color="#3d9cf0", opacity=0.8))
+            fig.update_layout(**PLOTLY_BASE, height=220,
+                              title=dict(text=f"{col_name} — Distribution{corr_txt}", x=0.02, y=0.97),
+                              xaxis=dict(gridcolor="#1f2937"), yaxis=dict(gridcolor="#1f2937"),
+                              margin=dict(l=8, r=8, t=40, b=8))
+            st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False},
+                            key=f"custom_{col_name}_hist")
+        else:
+            if "segment" in df.columns:
+                pivot = df.groupby([col_name, "segment"]).size().reset_index(name="count")
+                fig = go.Figure()
+                for seg in SEGMENT_INFO:
+                    sub = pivot[pivot["segment"] == seg]
+                    if sub.empty:
+                        continue
+                    fig.add_trace(go.Bar(name=seg, x=sub[col_name].astype(str), y=sub["count"],
+                                         marker_color=SEGMENT_INFO[seg]["color"]))
+                fig.update_layout(**PLOTLY_BASE, height=240, barmode="stack",
+                                  title=dict(text=f"{col_name} — Segment Breakdown", x=0.02, y=0.97),
+                                  xaxis=dict(gridcolor="#1f2937"), yaxis=dict(gridcolor="#1f2937"),
+                                  legend=dict(bgcolor="#13161d", bordercolor="#1f2937", borderwidth=1, font_size=9),
+                                  margin=dict(l=8, r=8, t=40, b=8))
+            else:
+                vc = df[col_name].astype(str).value_counts().head(10)
+                fig = go.Figure(go.Bar(x=vc.index, y=vc.values, marker_color="#c8f135"))
+                fig.update_layout(**PLOTLY_BASE, height=220,
+                                  title=dict(text=f"{col_name} — Value Counts", x=0.02, y=0.97),
+                                  xaxis=dict(gridcolor="#1f2937"), yaxis=dict(gridcolor="#1f2937"),
+                                  margin=dict(l=8, r=8, t=40, b=8))
+            st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False},
+                            key=f"custom_{col_name}_bar")
+
+
 # ── App ───────────────────────────────────────────────────────────────────────
 
 st.markdown("""
@@ -1121,7 +1761,15 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-tab_upload, tab_dashboard, tab_report = st.tabs(["⬆  Upload & Configure", "📊  Dashboard", "📄  Report"])
+tab_upload, tab_dashboard, tab_acquisition, tab_player, tab_sponsor, tab_matchday, tab_report = st.tabs([
+    "⬆  Upload & Configure",
+    "📊  Dashboard",
+    "🌍  Fan Acquisition",
+    "⚽  Player Intelligence",
+    "💼  Sponsorship",
+    "🏟  Matchday Intelligence",
+    "📄  Report",
+])
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB 1 — UPLOAD
@@ -1146,10 +1794,17 @@ with tab_upload:
         uploaded = st.file_uploader("Upload CSV", type=["csv"], label_visibility="collapsed")
 
         sample_bytes = generate_sample_csv()
-        st.download_button(
-            "⬇  Download sample CSV (400 fans)",
-            data=sample_bytes, file_name="footintel_sample.csv", mime="text/csv",
-        )
+        _dl1, _dl2 = st.columns(2)
+        with _dl1:
+            st.download_button(
+                "⬇  Download sample CSV (400 fans)",
+                data=sample_bytes, file_name="footintel_sample.csv", mime="text/csv",
+            )
+        with _dl2:
+            st.download_button(
+                "⬇  Download CSV template (headers only)",
+                data=generate_csv_template(), file_name="footintel_template.csv", mime="text/csv",
+            )
 
         if uploaded is not None:
             try:
@@ -1247,6 +1902,28 @@ with tab_upload:
             f'</div>'
         ), unsafe_allow_html=True)
 
+        # "We think these might match" — show auto-detected pairs prominently
+        if col_map_auto:
+            pairs_html = "".join(
+                f'<div style="display:inline-flex;align-items:center;gap:6px;'
+                f'background:#0a1a2e;border:1px solid #1d4ed8;border-radius:6px;'
+                f'padding:4px 10px;margin:3px 4px 3px 0;font-size:10px">'
+                f'<span style="color:#6b7280">{FIELD_LABELS.get(field, field)}</span>'
+                f'<span style="color:#374151">→</span>'
+                f'<span style="color:#3d9cf0">{csv_col}</span>'
+                f'</div>'
+                for field, csv_col in sorted(col_map_auto.items())
+            )
+            st.markdown(
+                f'<div style="background:#0a0c10;border:1px solid #1d4ed8;border-radius:8px;'
+                f'padding:12px 16px;margin-bottom:10px">'
+                f'<div style="font-size:10px;color:#3d9cf0;font-weight:600;margin-bottom:8px;'
+                f'text-transform:uppercase;letter-spacing:.08em">'
+                f'✦ We think these columns match — confirm or reassign below</div>'
+                f'{pairs_html}</div>',
+                unsafe_allow_html=True,
+            )
+
         def _idx(field: str) -> int:
             v = col_map_auto.get(field)
             return options.index(v) if v and v in options else 0
@@ -1341,6 +2018,33 @@ with tab_dashboard:
         df_all         = st.session_state["df_processed"]
         col_map_stored = st.session_state.get("col_map", {})
         club_name      = st.session_state.get("club_name", "").strip()
+
+        # ── Schema state banner ────────────────────────────────────────────────
+        _state, _missing = get_upload_state(col_map_stored)
+        if _state == "full":
+            st.markdown(
+                '<div style="background:#052e16;border:1px solid #166534;border-radius:8px;'
+                'padding:7px 16px;margin-bottom:14px;font-size:10px;color:#22c55e">'
+                '✓ Full schema matched — all scoring dimensions and features unlocked.</div>',
+                unsafe_allow_html=True,
+            )
+        elif _state == "partial":
+            missing_labels = ", ".join(FIELD_LABELS.get(m, m) for m in sorted(_missing))
+            st.markdown(
+                f'<div style="background:#1c1500;border:1px solid #92400e;border-radius:8px;'
+                f'padding:7px 16px;margin-bottom:14px;font-size:10px;color:#f59e0b">'
+                f'⚠ Partial match — {len(_missing)} core column(s) missing: <b>{missing_labels}</b>. '
+                f'Affected scores use neutral values. Map more columns for higher accuracy.</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                '<div style="background:#1c1500;border:1px solid #92400e;border-radius:8px;'
+                'padding:7px 16px;margin-bottom:14px;font-size:10px;color:#f59e0b">'
+                '⚠ Custom data mode — limited standard columns detected. '
+                'See the Custom Metrics Explorer in the Report tab for your data.</div>',
+                unsafe_allow_html=True,
+            )
 
         heading = f"{club_name} — Fan Dashboard" if club_name else "Fan Dashboard"
         st.markdown(
@@ -1713,3 +2417,424 @@ with tab_report:
             pdf_bytes = generate_pdf_report(df, club_name)
             st.download_button("⬇  PDF Report", data=pdf_bytes,
                                file_name=f"footintel_report_{today_str}.pdf", mime="application/pdf")
+
+        # Custom metrics explorer — shown in report tab if extra columns exist
+        if "df_processed" in st.session_state and "col_map" in st.session_state:
+            render_custom_metrics_explorer(
+                st.session_state["df_processed"],
+                st.session_state["col_map"],
+            )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB 4 — FAN ACQUISITION
+# ─────────────────────────────────────────────────────────────────────────────
+with tab_acquisition:
+    if "df_processed" not in st.session_state:
+        st.markdown(card(
+            '<div style="text-align:center;color:#6b7280;font-size:12px;padding:24px">'
+            'Upload a CSV in the Upload tab to unlock Fan Acquisition intelligence.</div>'
+        ), unsafe_allow_html=True)
+    else:
+        df_acq     = st.session_state["df_processed"]
+        col_acq    = st.session_state.get("col_map", {})
+        club_name  = st.session_state.get("club_name", "").strip()
+        heading    = f"{club_name} — Fan Acquisition" if club_name else "Fan Acquisition"
+        st.markdown(
+            f'<div style="font-family:\'Syne\',sans-serif;font-size:20px;font-weight:700;'
+            f'color:#e5e7eb;margin-bottom:4px">{heading}</div>'
+            f'<div style="font-size:11px;color:#6b7280;margin-bottom:18px">'
+            f'Identify which regions have the highest fan growth potential and where to focus acquisition spend.</div>',
+            unsafe_allow_html=True,
+        )
+
+        acq_df = compute_acquisition_data(df_acq, col_acq)
+
+        if acq_df.empty:
+            st.markdown(card(
+                '<div style="font-size:11px;color:#9ca3af;padding:12px">Map a <b style="color:#c8f135">Country / Region</b> '
+                'column to unlock the Fan Acquisition tab.</div>'
+            ), unsafe_allow_html=True)
+        else:
+            # ── KPIs ──────────────────────────────────────────────────────────
+            top_market   = acq_df[~acq_df["country"].isin(["Other"])].iloc[0]
+            total_mkts   = acq_df[~acq_df["country"].isin(["Other"])].shape[0]
+            high_prio    = (acq_df["acquisition_score"] >= 70).sum()
+
+            aq1, aq2, aq3, aq4 = st.columns(4)
+            with aq1: st.markdown(kpi("Markets Tracked", str(total_mkts), "distinct regions"), unsafe_allow_html=True)
+            with aq2: st.markdown(kpi("Top Acquisition Market", top_market["country"], f"Score: {top_market['acquisition_score']:.0f}", "#c8f135"), unsafe_allow_html=True)
+            with aq3: st.markdown(kpi("High-Priority Markets", str(high_prio), "score ≥ 70", "#22c55e"), unsafe_allow_html=True)
+            with aq4: st.markdown(kpi("Avg Acquisition Score", f"{acq_df['acquisition_score'].mean():.0f}", "across all regions", "#3d9cf0"), unsafe_allow_html=True)
+
+            st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
+
+            # ── Map + priority bar ─────────────────────────────────────────────
+            mp1, mp2 = st.columns([3, 2])
+            with mp1:
+                st.plotly_chart(chart_acquisition_map(acq_df), use_container_width=True,
+                                config={"displayModeBar": False}, key="acq_map")
+            with mp2:
+                st.plotly_chart(chart_acquisition_priority_bar(acq_df), use_container_width=True,
+                                config={"displayModeBar": False}, key="acq_priority_bar")
+
+            # ── Market landscape scatter ───────────────────────────────────────
+            st.plotly_chart(chart_acquisition_landscape(acq_df), use_container_width=True,
+                            config={"displayModeBar": False}, key="acq_landscape")
+
+            # ── Demographic gaps ───────────────────────────────────────────────
+            section_heading("Demographic Gap Analysis")
+            st.plotly_chart(chart_demographic_gaps(df_acq), use_container_width=True,
+                            config={"displayModeBar": False}, key="acq_demo_gaps")
+
+            # ── Top 5 recommended acquisition target markets ───────────────────
+            section_heading("Top 5 Acquisition Target Markets")
+            _acq_country_segs = df_acq.groupby("segment").size()
+            _dominant_seg = _acq_country_segs.idxmax() if not _acq_country_segs.empty else "Casual"
+
+            _ACTIVATION_TEMPLATES = {
+                "USA": ("Young Adults in USA", "High engagement, growing market, low commercial conversion",
+                        "First-purchase welcome offer + app download incentive"),
+                "Germany": ("Adults in Germany", "High commercial score, under-represented in fan base",
+                            "Premium membership drive with localised content"),
+                "Spain": ("Young Adults in Spain", "Strong engagement index, low current fan density",
+                          "Social media activation + local influencer campaign"),
+                "Ireland": ("All ages in Ireland", "Cultural proximity — high loyalty potential",
+                            "Season ticket trial + local club partnership"),
+                "France": ("Adults in France", "High headroom market with growing football interest",
+                           "Digital-first fan engagement campaign"),
+            }
+
+            top5 = acq_df[~acq_df["country"].isin(["Other"])].head(5)
+            for _, mkt_row in top5.iterrows():
+                country = mkt_row["country"]
+                tpl = _ACTIVATION_TEMPLATES.get(country, (
+                    f"Fans in {country}",
+                    f"Engagement: {mkt_row['avg_engagement']:.0f}/100 — Commercial: {mkt_row['avg_commercial']:.0f}/100",
+                    "Targeted digital campaign with localised matchday content",
+                ))
+                score_color = "#c8f135" if mkt_row["acquisition_score"] >= 70 else "#f59e0b" if mkt_row["acquisition_score"] >= 50 else "#3d9cf0"
+                st.markdown(card(
+                    f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">'
+                    f'  <span style="font-family:\'Syne\',sans-serif;font-size:14px;font-weight:700;color:{score_color}">{country}</span>'
+                    f'  <span style="background:#13161d;color:{score_color};border:1px solid {score_color};'
+                    f'      font-size:11px;padding:3px 12px;border-radius:8px">Priority Score: {mkt_row["acquisition_score"]:.0f}</span>'
+                    f'</div>'
+                    f'<div style="font-size:11px;color:#9ca3af;margin-bottom:4px"><b style="color:#e5e7eb">{tpl[0]}</b> — {tpl[1]}</div>'
+                    f'<div style="display:flex;gap:18px;font-size:10px;color:#6b7280;margin-bottom:8px">'
+                    f'  <span>Fans: <b style="color:#e5e7eb">{int(mkt_row["fan_count"]):,}</b></span>'
+                    f'  <span>Avg Engagement: <b style="color:#3d9cf0">{mkt_row["avg_engagement"]:.0f}</b></span>'
+                    f'  <span>Avg Commercial: <b style="color:#c8f135">{mkt_row["avg_commercial"]:.0f}</b></span>'
+                    f'  <span>Growth Headroom: <b style="color:#22c55e">{mkt_row["growth_headroom"]:.0f}%</b></span>'
+                    f'</div>'
+                    f'<div style="font-size:10px;color:#6b7280;border-left:2px solid {score_color};padding-left:8px">'
+                    f'  Recommended activation: <span style="color:#9ca3af">{tpl[2]}</span></div>',
+                    bg="#0d1117", border=score_color,
+                ), unsafe_allow_html=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB 5 — PLAYER INTELLIGENCE
+# ─────────────────────────────────────────────────────────────────────────────
+with tab_player:
+    if "df_processed" not in st.session_state:
+        st.markdown(card(
+            '<div style="text-align:center;color:#6b7280;font-size:12px;padding:24px">'
+            'Upload a CSV in the Upload tab to unlock Player Intelligence.</div>'
+        ), unsafe_allow_html=True)
+    else:
+        df_pl     = st.session_state["df_processed"]
+        club_name = st.session_state.get("club_name", "").strip()
+        heading   = f"{club_name} — Player Intelligence" if club_name else "Player Intelligence"
+        st.markdown(
+            f'<div style="font-family:\'Syne\',sans-serif;font-size:20px;font-weight:700;'
+            f'color:#e5e7eb;margin-bottom:4px">{heading}</div>'
+            f'<div style="font-size:11px;color:#6b7280;margin-bottom:6px">'
+            f'Player commercial value scores and fan affinity mapping. '
+            f'Player affiliations are <b style="color:#f59e0b">synthetically modelled</b> from segment data '
+            f'when no player column is present in your CSV.</div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            '<div style="background:#1c1500;border:1px solid #92400e;border-radius:6px;padding:6px 14px;'
+            'margin-bottom:16px;font-size:10px;color:#f59e0b">◯ Synthetic — player affiliations are modelled from fan segment data.</div>',
+            unsafe_allow_html=True,
+        )
+
+        df_with_players = assign_synthetic_players(df_pl)
+        player_df = compute_player_scores(df_with_players)
+
+        # ── KPIs ──────────────────────────────────────────────────────────────
+        top_player = player_df.iloc[0]
+        pl1, pl2, pl3, pl4 = st.columns(4)
+        with pl1: st.markdown(kpi("Players Tracked", str(len(player_df)), "in fan dataset"), unsafe_allow_html=True)
+        with pl2: st.markdown(kpi("Top Commercial Value", top_player["player"].split()[0], f"Score: {top_player['commercial_value_score']:.0f}", "#c8f135"), unsafe_allow_html=True)
+        with pl3: st.markdown(kpi("Avg Loyal Fan Share", f"{player_df['loyal_fan_pct'].mean():.0f}%", "per player's fanbase", "#22c55e"), unsafe_allow_html=True)
+        with pl4: st.markdown(kpi("Avg Conversion Score", f"{player_df['avg_conversion'].mean():.0f}", "per player's fanbase", "#a78bfa"), unsafe_allow_html=True)
+
+        st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
+
+        # ── Charts row ────────────────────────────────────────────────────────
+        plc1, plc2 = st.columns(2)
+        with plc1:
+            st.plotly_chart(chart_player_value_bar(player_df), use_container_width=True,
+                            config={"displayModeBar": False}, key="player_value_bar")
+        with plc2:
+            st.plotly_chart(chart_player_affinity_heatmap(df_with_players), use_container_width=True,
+                            config={"displayModeBar": False}, key="player_affinity_heatmap")
+
+        # ── Player data table ─────────────────────────────────────────────────
+        section_heading("Player Commercial Value Table")
+        st.dataframe(
+            player_df.rename(columns={
+                "player": "Player", "fan_count": "Fans",
+                "avg_engagement": "Avg Engagement", "avg_commercial": "Avg Commercial",
+                "avg_loyalty": "Avg Loyalty", "loyal_fan_pct": "Loyal Fan %",
+                "high_potential_pct": "High Potential %", "avg_conversion": "Avg Conversion",
+                "commercial_value_score": "Commercial Value Score",
+            }).style.background_gradient(subset=["Commercial Value Score"], cmap="RdYlGn"),
+            use_container_width=True, height=360, hide_index=True,
+        )
+
+        # ── Recommended commercial actions per player ─────────────────────────
+        section_heading("Recommended Commercial Actions per Player")
+
+        for _, prow in player_df.head(5).iterrows():
+            score = prow["commercial_value_score"]
+            loyal = prow["loyal_fan_pct"]
+            hp    = prow["high_potential_pct"]
+            conv  = prow["avg_conversion"]
+            eng   = prow["avg_engagement"]
+
+            if loyal >= 20:
+                action = f"Highest affinity with Loyal Fans ({loyal:.0f}%) — ideal for premium membership or season ticket renewal campaign."
+            elif hp >= 18:
+                action = f"Strong High Potential fanbase ({hp:.0f}%) — target with first-purchase conversion offer or membership upgrade."
+            elif conv >= 60:
+                action = f"High conversion probability ({conv:.0f}/100) — prioritise for limited-edition retail or matchday hospitality upsell."
+            else:
+                action = f"Broad casual fan appeal (engagement: {eng:.0f}) — best suited for awareness campaigns and social media activation."
+
+            score_c = "#c8f135" if score >= 70 else "#22c55e" if score >= 55 else "#3d9cf0"
+            st.markdown(card(
+                f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">'
+                f'  <span style="font-family:\'Syne\',sans-serif;font-size:14px;font-weight:700;color:{score_c}">{prow["player"]}</span>'
+                f'  <span style="background:#13161d;color:{score_c};border:1px solid {score_c};'
+                f'      font-size:11px;padding:3px 12px;border-radius:8px">Value Score: {score:.0f}</span>'
+                f'</div>'
+                f'<div style="display:flex;gap:16px;font-size:10px;color:#6b7280;margin-bottom:8px">'
+                f'  <span>Fans: <b style="color:#e5e7eb">{int(prow["fan_count"]):,}</b></span>'
+                f'  <span>Loyal: <b style="color:#22c55e">{loyal:.0f}%</b></span>'
+                f'  <span>High Potential: <b style="color:#3d9cf0">{hp:.0f}%</b></span>'
+                f'  <span>Avg Conversion: <b style="color:#a78bfa">{conv:.0f}</b></span>'
+                f'</div>'
+                f'<div style="font-size:10px;color:#9ca3af;border-left:2px solid {score_c};padding-left:8px">{action}</div>',
+                bg="#0d1117", border=score_c,
+            ), unsafe_allow_html=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB 6 — SPONSORSHIP INTELLIGENCE
+# ─────────────────────────────────────────────────────────────────────────────
+with tab_sponsor:
+    if "df_processed" not in st.session_state:
+        st.markdown(card(
+            '<div style="text-align:center;color:#6b7280;font-size:12px;padding:24px">'
+            'Upload a CSV in the Upload tab to unlock Sponsorship Intelligence.</div>'
+        ), unsafe_allow_html=True)
+    else:
+        df_sp     = st.session_state["df_processed"]
+        col_sp    = st.session_state.get("col_map", {})
+        club_name = st.session_state.get("club_name", "").strip()
+        heading   = f"{club_name} — Sponsorship Intelligence" if club_name else "Sponsorship Intelligence"
+        st.markdown(
+            f'<div style="font-family:\'Syne\',sans-serif;font-size:20px;font-weight:700;'
+            f'color:#e5e7eb;margin-bottom:4px">{heading}</div>'
+            f'<div style="font-size:11px;color:#6b7280;margin-bottom:18px">'
+            f'Fan demographic breakdown, audience quality metrics, and sponsor category recommendations '
+            f'ready to present to commercial partners.</div>',
+            unsafe_allow_html=True,
+        )
+
+        pitch_score = compute_sponsorship_pitch_score(df_sp)
+        pitch_color = "#22c55e" if pitch_score >= 70 else "#f59e0b" if pitch_score >= 50 else "#ef4444"
+        pitch_label = "Excellent" if pitch_score >= 70 else "Good" if pitch_score >= 50 else "Developing"
+
+        # ── Sponsorship Pitch Score hero ───────────────────────────────────────
+        st.markdown(
+            f'<div style="background:#0d1117;border:1px solid {pitch_color}40;border-radius:12px;'
+            f'padding:24px 28px;margin-bottom:18px;display:flex;align-items:center;gap:28px">'
+            f'  <div>'
+            f'    <div style="font-size:10px;color:#4b5563;text-transform:uppercase;letter-spacing:.1em;margin-bottom:4px">Sponsorship Pitch Score</div>'
+            f'    <div style="font-family:\'Syne\',sans-serif;font-size:52px;font-weight:800;color:{pitch_color};line-height:1">{pitch_score}</div>'
+            f'    <div style="font-size:13px;color:{pitch_color};margin-top:4px">/ 100 — {pitch_label}</div>'
+            f'  </div>'
+            f'  <div style="font-size:11px;color:#6b7280;line-height:1.8;flex:1">'
+            f'    Commercial attractiveness score for sponsors based on fan engagement, '
+            f'    purchase propensity, segment quality and churn stability.<br>'
+            f'    <span style="color:#9ca3af">Engagement 25% · Commercial 35% · Loyal Fan % 20% · High Potential % 10% · Low Churn % 10%</span>'
+            f'  </div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+        # ── KPIs ──────────────────────────────────────────────────────────────
+        total_sp   = len(df_sp)
+        loyal_pct  = (df_sp["segment"] == "Loyal Fans").mean() * 100
+        hp_pct     = (df_sp["segment"] == "High Potential").mean() * 100
+        low_ch_pct = (df_sp["churn_risk_label"] == "LOW").mean() * 100
+
+        sp1, sp2, sp3, sp4 = st.columns(4)
+        with sp1: st.markdown(kpi("Fan Base Size", f"{total_sp:,}", "analysed fans"), unsafe_allow_html=True)
+        with sp2: st.markdown(kpi("Loyal Fans", f"{loyal_pct:.0f}%", "premium audience tier", "#22c55e"), unsafe_allow_html=True)
+        with sp3: st.markdown(kpi("High Potential", f"{hp_pct:.0f}%", "conversion-ready fans", "#3d9cf0"), unsafe_allow_html=True)
+        with sp4: st.markdown(kpi("Low Churn", f"{low_ch_pct:.0f}%", "stable audience", "#c8f135"), unsafe_allow_html=True)
+
+        st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
+
+        # ── Charts row 1: age donut + commercial dist ─────────────────────────
+        spc1, spc2 = st.columns(2)
+        with spc1:
+            st.plotly_chart(chart_sponsor_age_donut(df_sp), use_container_width=True,
+                            config={"displayModeBar": False}, key="sponsor_age_donut")
+        with spc2:
+            st.plotly_chart(chart_sponsor_commercial_dist(df_sp), use_container_width=True,
+                            config={"displayModeBar": False}, key="sponsor_commercial_dist")
+
+        # ── Segment value for sponsors ─────────────────────────────────────────
+        st.plotly_chart(chart_sponsor_segment_value(df_sp), use_container_width=True,
+                        config={"displayModeBar": False}, key="sponsor_seg_value")
+
+        # ── Sponsor category recommendations ──────────────────────────────────
+        section_heading("Top 5 Sponsor Category Recommendations")
+        sponsor_recs = get_sponsor_recommendations(df_sp, col_sp)
+        fit_colors   = {"HIGH": "#22c55e", "MED": "#f59e0b", "LOW": "#3d9cf0"}
+        fit_bg       = {"HIGH": "#052e16", "MED": "#1c1500", "LOW": "#0a1a2e"}
+
+        for rec in sponsor_recs:
+            fc = fit_colors.get(rec["fit"], "#6b7280")
+            fb = fit_bg.get(rec["fit"], "#13161d")
+            st.markdown(card(
+                f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">'
+                f'  <span style="font-family:\'Syne\',sans-serif;font-size:14px;font-weight:700;color:#e5e7eb">{rec["category"]}</span>'
+                f'  <span style="background:{fb};color:{fc};border:1px solid {fc};font-size:10px;padding:3px 10px;border-radius:8px">{rec["fit"]} FIT</span>'
+                f'</div>'
+                f'<div style="font-size:11px;color:#9ca3af;margin-bottom:6px">{rec["reason"]}</div>'
+                f'<div style="font-size:10px;color:#6b7280">Example brands: <span style="color:#9ca3af">{rec["examples"]}</span></div>',
+                bg="#0d1117", border=fc,
+            ), unsafe_allow_html=True)
+
+        # ── Download sponsorship PDF ───────────────────────────────────────────
+        st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+        section_heading("Download Sponsorship Deck")
+        today_str_sp = datetime.today().strftime("%Y-%m-%d")
+        sponsor_pdf = generate_sponsor_pdf(df_sp, club_name)
+        st.download_button(
+            "⬇  Download One-Page Sponsorship Deck (PDF)",
+            data=sponsor_pdf,
+            file_name=f"sponsorship_deck_{club_name.replace(' ', '_').lower() if club_name else 'footintel'}_{today_str_sp}.pdf",
+            mime="application/pdf",
+            key="sponsor_pdf_download",
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB 7 — MATCHDAY INTELLIGENCE
+# ─────────────────────────────────────────────────────────────────────────────
+with tab_matchday:
+    if "df_processed" not in st.session_state:
+        st.markdown(card(
+            '<div style="text-align:center;color:#6b7280;font-size:12px;padding:24px">'
+            'Upload a CSV in the Upload tab to unlock Matchday Intelligence.</div>'
+        ), unsafe_allow_html=True)
+    else:
+        df_md_tab  = st.session_state["df_processed"]
+        col_md     = st.session_state.get("col_map", {})
+        club_name  = st.session_state.get("club_name", "").strip()
+        heading    = f"{club_name} — Matchday Intelligence" if club_name else "Matchday Intelligence"
+        st.markdown(
+            f'<div style="font-family:\'Syne\',sans-serif;font-size:20px;font-weight:700;'
+            f'color:#e5e7eb;margin-bottom:4px">{heading}</div>'
+            f'<div style="font-size:11px;color:#6b7280;margin-bottom:18px">'
+            f'Expected matchday revenue, hospitality upsell opportunities, and engagement windows. '
+            f'Revenue figures are <b style="color:#f59e0b">estimated</b> from segment-level commercial scores.</div>',
+            unsafe_allow_html=True,
+        )
+
+        md_data = compute_matchday_data(df_md_tab, col_md)
+        rev_df  = md_data["rev_by_seg"]
+        hosp    = md_data["hospitality_targets"]
+        windows = md_data["windows"]
+
+        # ── KPIs ──────────────────────────────────────────────────────────────
+        top_seg_row = rev_df.sort_values("total_est_revenue", ascending=False).iloc[0]
+        hp_opp      = md_data["hp_count"]
+        hp_conv_rev = hp_opp * md_data["hp_avg_spend"] * 0.10  # 10% conversion estimate
+
+        md1, md2, md3, md4 = st.columns(4)
+        with md1: st.markdown(kpi("Total Est. Matchday Revenue", f"£{md_data['total_est_revenue']:,.0f}", "per fixture (all fans)", "#c8f135"), unsafe_allow_html=True)
+        with md2: st.markdown(kpi("Top Revenue Segment", top_seg_row["segment"], f"£{top_seg_row['total_est_revenue']:,.0f} est.", "#22c55e"), unsafe_allow_html=True)
+        with md3: st.markdown(kpi("Hospitality Upsell Targets", f"{len(hosp):,}", "Loyal/High Potential, no tickets yet", "#3d9cf0"), unsafe_allow_html=True)
+        with md4: st.markdown(kpi("High Potential Fans", f"{hp_opp:,}", "conversion opportunity", "#a78bfa"), unsafe_allow_html=True)
+
+        st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
+
+        # ── Revenue charts ─────────────────────────────────────────────────────
+        mdc1, mdc2 = st.columns(2)
+        with mdc1:
+            st.plotly_chart(chart_matchday_revenue_by_segment(rev_df), use_container_width=True,
+                            config={"displayModeBar": False}, key="matchday_rev_seg")
+        with mdc2:
+            st.plotly_chart(chart_matchday_avg_spend(rev_df), use_container_width=True,
+                            config={"displayModeBar": False}, key="matchday_avg_spend")
+
+        # ── Engagement windows ─────────────────────────────────────────────────
+        section_heading("Pre / During / Post-Match Engagement Windows")
+        st.plotly_chart(chart_engagement_windows(windows), use_container_width=True,
+                        config={"displayModeBar": False}, key="matchday_windows")
+
+        # ── Revenue opportunity callout ────────────────────────────────────────
+        st.markdown(
+            f'<div style="background:#0a1a2e;border:1px solid #1d4ed8;border-radius:10px;'
+            f'padding:18px 22px;margin:14px 0">'
+            f'  <div style="font-size:11px;color:#3d9cf0;font-weight:600;margin-bottom:6px">💡 Revenue Opportunity</div>'
+            f'  <div style="font-size:12px;color:#9ca3af;line-height:1.8">'
+            f'    You have <b style="color:#e5e7eb">{hp_opp:,} High Potential fans</b> who are highly engaged '
+            f'    but not yet converted to matchday attendance.<br>'
+            f'    Converting just <b style="color:#c8f135">10%</b> of this group at an estimated '
+            f'    <b style="color:#c8f135">£{md_data["hp_avg_spend"]:.0f}</b> avg spend = '
+            f'    <b style="color:#22c55e">£{hp_conv_rev:,.0f} estimated additional revenue</b> per fixture.'
+            f'  </div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+        # ── Top 20 fans for matchday hospitality upgrade ───────────────────────
+        section_heading("Top 20 Hospitality Upgrade Targets")
+        st.markdown(
+            '<div style="font-size:11px;color:#6b7280;margin-bottom:8px">'
+            'Loyal Fans and High Potential fans with no ticket purchase history, ranked by conversion probability.</div>',
+            unsafe_allow_html=True,
+        )
+        if not hosp.empty:
+            col_md_stored = col_md
+            disp_md = (
+                [col_md_stored["user_id"]] if "user_id" in col_md_stored else []
+            ) + [c for c in ["segment", "journey_stage", "conversion_probability",
+                              "engagement_score", "commercial_score", "churn_risk_label",
+                              "matchday_spend_est"] if c in hosp.columns]
+            st.dataframe(
+                hosp[disp_md].reset_index(drop=True)
+                .style.background_gradient(subset=["conversion_probability"], cmap="RdYlGn"),
+                use_container_width=True, height=400,
+            )
+        else:
+            st.info("No Loyal or High Potential fans without ticket history found.")
+
+        # ── Segment revenue table ──────────────────────────────────────────────
+        section_heading("Matchday Revenue Summary by Segment")
+        rev_display = rev_df.copy()
+        rev_display["total_est_revenue"] = rev_display["total_est_revenue"].apply(lambda v: f"£{v:,.0f}")
+        rev_display["avg_spend"]         = rev_display["avg_spend"].apply(lambda v: f"£{v:.2f}")
+        rev_display.columns              = ["Segment", "Fan Count", "Est. Total Revenue", "Est. Avg Spend"]
+        st.dataframe(rev_display, use_container_width=True, hide_index=True)
