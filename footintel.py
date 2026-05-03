@@ -257,6 +257,17 @@ def get_upload_state(col_map: dict) -> tuple[str, set]:
     return "custom", missing
 
 
+def _locked_tab_msg(reason: str = "") -> None:
+    msg = reason or "This tab requires core fan data columns. Please upload a compatible CSV or download the template."
+    st.markdown(card(
+        f'<div style="text-align:center;padding:28px 16px">'
+        f'<div style="font-size:22px;margin-bottom:10px">🔒</div>'
+        f'<div style="font-size:12px;color:#6b7280">{msg}</div>'
+        f'</div>',
+        border="#2a2f3d",
+    ), unsafe_allow_html=True)
+
+
 def grayed_kpi(label: str, missing_col: str) -> str:
     tip = f"Add {missing_col} to unlock this metric."
     return (
@@ -2004,8 +2015,16 @@ with tab_upload:
                 }
                 confirmed_map = {f: v for f, v in raw_sel.items() if v != "— not mapped —"}
                 st.session_state["col_map"] = confirmed_map
-                df_proc = process_data(df_raw, confirmed_map)
-                st.session_state["df_processed"] = df_proc
+
+                _state_check, _missing_check = get_upload_state(confirmed_map)
+                if _state_check == "custom":
+                    # Fewer than 5 core columns — skip scoring engine entirely
+                    st.session_state.pop("df_processed", None)
+                    st.session_state["schema_mode"] = "custom"
+                else:
+                    df_proc = process_data(df_raw, confirmed_map)
+                    st.session_state["df_processed"] = df_proc
+                    st.session_state["schema_mode"] = _state_check  # "full" or "partial"
                 st.rerun()
 
 
@@ -2013,7 +2032,9 @@ with tab_upload:
 # TAB 2 — DASHBOARD
 # ─────────────────────────────────────────────────────────────────────────────
 with tab_dashboard:
-    if "df_processed" not in st.session_state:
+    if st.session_state.get("schema_mode") == "custom":
+        _locked_tab_msg()
+    elif "df_processed" not in st.session_state:
         st.markdown(card(
             '<div style="text-align:center;color:#6b7280;font-size:12px;padding:24px">'
             'Upload a CSV in the Upload tab to populate the dashboard.</div>'
@@ -2292,7 +2313,15 @@ with tab_dashboard:
 # TAB 3 — REPORT
 # ─────────────────────────────────────────────────────────────────────────────
 with tab_report:
-    if "df_processed" not in st.session_state:
+    if st.session_state.get("schema_mode") == "custom":
+        _locked_tab_msg()
+        # Still show custom metrics explorer for custom-mode uploads
+        if "df_raw" in st.session_state and "col_map" in st.session_state:
+            render_custom_metrics_explorer(
+                st.session_state["df_raw"],
+                st.session_state["col_map"],
+            )
+    elif "df_processed" not in st.session_state:
         st.markdown(card(
             '<div style="text-align:center;color:#6b7280;font-size:12px;padding:24px">'
             'Upload a CSV in the Upload tab to generate the report.</div>'
@@ -2434,8 +2463,8 @@ with tab_report:
 # TAB 4 — FAN ACQUISITION
 # ─────────────────────────────────────────────────────────────────────────────
 with tab_acquisition:
-    if "df_processed" not in st.session_state:
-        st.markdown(card(
+    if st.session_state.get("schema_mode") == "custom" or "df_processed" not in st.session_state:
+        _locked_tab_msg() if st.session_state.get("schema_mode") == "custom" else st.markdown(card(
             '<div style="text-align:center;color:#6b7280;font-size:12px;padding:24px">'
             'Upload a CSV in the Upload tab to unlock Fan Acquisition intelligence.</div>'
         ), unsafe_allow_html=True)
@@ -2541,107 +2570,137 @@ with tab_acquisition:
 # TAB 5 — PLAYER INTELLIGENCE
 # ─────────────────────────────────────────────────────────────────────────────
 with tab_player:
-    if "df_processed" not in st.session_state:
+    if st.session_state.get("schema_mode") == "custom":
+        _locked_tab_msg()
+    elif "df_processed" not in st.session_state:
         st.markdown(card(
             '<div style="text-align:center;color:#6b7280;font-size:12px;padding:24px">'
             'Upload a CSV in the Upload tab to unlock Player Intelligence.</div>'
         ), unsafe_allow_html=True)
     else:
-        df_pl     = st.session_state["df_processed"]
-        club_name = st.session_state.get("club_name", "").strip()
-        heading   = f"{club_name} — Player Intelligence" if club_name else "Player Intelligence"
+        df_pl      = st.session_state["df_processed"]
+        col_pl     = st.session_state.get("col_map", {})
+        club_name  = st.session_state.get("club_name", "").strip()
+
+        # Check for Favourite_Player column
+        _fav_player_col = None
+        _df_raw_pl = st.session_state.get("df_raw")
+        if _df_raw_pl is not None:
+            for raw_col in _df_raw_pl.columns:
+                if raw_col.strip().lower().replace(" ", "_") in ("favourite_player", "favorite_player",
+                                                                  "fav_player", "player", "preferred_player"):
+                    _fav_player_col = raw_col
+                    break
+
+        has_player_col = _fav_player_col is not None
+
+        heading   = f"{club_name} - Player Intelligence" if club_name else "Player Intelligence"
         st.markdown(
             f'<div style="font-family:\'Syne\',sans-serif;font-size:20px;font-weight:700;'
             f'color:#e5e7eb;margin-bottom:4px">{heading}</div>'
             f'<div style="font-size:11px;color:#6b7280;margin-bottom:6px">'
-            f'Player commercial value scores and fan affinity mapping. '
-            f'Player affiliations are <b style="color:#f59e0b">synthetically modelled</b> from segment data '
-            f'when no player column is present in your CSV.</div>',
-            unsafe_allow_html=True,
-        )
-        st.markdown(
-            '<div style="background:#1c1500;border:1px solid #92400e;border-radius:6px;padding:6px 14px;'
-            'margin-bottom:16px;font-size:10px;color:#f59e0b">◯ Synthetic — player affiliations are modelled from fan segment data.</div>',
+            f'Player commercial value scores and fan affinity mapping.</div>',
             unsafe_allow_html=True,
         )
 
-        df_with_players = assign_synthetic_players(df_pl)
-        player_df = compute_player_scores(df_with_players)
+        if not has_player_col:
+            _locked_tab_msg(
+                "Add a <b>Favourite_Player</b> column to your CSV to unlock Player Intelligence. "
+                "This column should contain the name of each fan's favourite player."
+            )
+        else:
+            # Real player column found — use it
+            df_pl = df_pl.copy()
+            df_pl["_player"] = st.session_state["df_raw"][_fav_player_col].astype(str).values
+            player_df = compute_player_scores(df_pl)
 
-        # ── KPIs ──────────────────────────────────────────────────────────────
-        top_player = player_df.iloc[0]
-        pl1, pl2, pl3, pl4 = st.columns(4)
-        with pl1: st.markdown(kpi("Players Tracked", str(len(player_df)), "in fan dataset"), unsafe_allow_html=True)
-        with pl2: st.markdown(kpi("Top Commercial Value", top_player["player"].split()[0], f"Score: {top_player['commercial_value_score']:.0f}", "#c8f135"), unsafe_allow_html=True)
-        with pl3: st.markdown(kpi("Avg Loyal Fan Share", f"{player_df['loyal_fan_pct'].mean():.0f}%", "per player's fanbase", "#22c55e"), unsafe_allow_html=True)
-        with pl4: st.markdown(kpi("Avg Conversion Score", f"{player_df['avg_conversion'].mean():.0f}", "per player's fanbase", "#a78bfa"), unsafe_allow_html=True)
+            st.markdown(
+                f'<div style="background:#052e16;border:1px solid #166534;border-radius:6px;padding:6px 14px;'
+                f'margin-bottom:16px;font-size:10px;color:#22c55e">'
+                f'Live data from column: <b>{_fav_player_col}</b></div>',
+                unsafe_allow_html=True,
+            )
 
-        st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
+        if has_player_col:
+            df_with_players = df_pl  # already has _player
 
-        # ── Charts row ────────────────────────────────────────────────────────
-        plc1, plc2 = st.columns(2)
-        with plc1:
-            st.plotly_chart(chart_player_value_bar(player_df), use_container_width=True,
-                            config={"displayModeBar": False}, key="player_value_bar")
-        with plc2:
-            st.plotly_chart(chart_player_affinity_heatmap(df_with_players), use_container_width=True,
-                            config={"displayModeBar": False}, key="player_affinity_heatmap")
+        if has_player_col:
+            # ── KPIs ──────────────────────────────────────────────────────────
+            top_player = player_df.iloc[0]
+            pl1, pl2, pl3, pl4 = st.columns(4)
+            with pl1: st.markdown(kpi("Players Tracked", str(len(player_df)), "in fan dataset"), unsafe_allow_html=True)
+            with pl2: st.markdown(kpi("Top Commercial Value", top_player["player"].split()[0], f"Score: {top_player['commercial_value_score']:.0f}", "#c8f135"), unsafe_allow_html=True)
+            with pl3: st.markdown(kpi("Avg Loyal Fan Share", f"{player_df['loyal_fan_pct'].mean():.0f}%", "per player's fanbase", "#22c55e"), unsafe_allow_html=True)
+            with pl4: st.markdown(kpi("Avg Conversion Score", f"{player_df['avg_conversion'].mean():.0f}", "per player's fanbase", "#a78bfa"), unsafe_allow_html=True)
 
-        # ── Player data table ─────────────────────────────────────────────────
-        section_heading("Player Commercial Value Table")
-        st.dataframe(
-            player_df.rename(columns={
-                "player": "Player", "fan_count": "Fans",
-                "avg_engagement": "Avg Engagement", "avg_commercial": "Avg Commercial",
-                "avg_loyalty": "Avg Loyalty", "loyal_fan_pct": "Loyal Fan %",
-                "high_potential_pct": "High Potential %", "avg_conversion": "Avg Conversion",
-                "commercial_value_score": "Commercial Value Score",
-            }).style.background_gradient(subset=["Commercial Value Score"], cmap="RdYlGn"),
-            use_container_width=True, height=360, hide_index=True,
-        )
+            st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
 
-        # ── Recommended commercial actions per player ─────────────────────────
-        section_heading("Recommended Commercial Actions per Player")
+            # ── Charts row ────────────────────────────────────────────────────
+            plc1, plc2 = st.columns(2)
+            with plc1:
+                st.plotly_chart(chart_player_value_bar(player_df), use_container_width=True,
+                                config={"displayModeBar": False}, key="player_value_bar")
+            with plc2:
+                st.plotly_chart(chart_player_affinity_heatmap(df_with_players), use_container_width=True,
+                                config={"displayModeBar": False}, key="player_affinity_heatmap")
 
-        for _, prow in player_df.head(5).iterrows():
-            score = prow["commercial_value_score"]
-            loyal = prow["loyal_fan_pct"]
-            hp    = prow["high_potential_pct"]
-            conv  = prow["avg_conversion"]
-            eng   = prow["avg_engagement"]
+            # ── Player data table ─────────────────────────────────────────────
+            section_heading("Player Commercial Value Table")
+            st.dataframe(
+                player_df.rename(columns={
+                    "player": "Player", "fan_count": "Fans",
+                    "avg_engagement": "Avg Engagement", "avg_commercial": "Avg Commercial",
+                    "avg_loyalty": "Avg Loyalty", "loyal_fan_pct": "Loyal Fan %",
+                    "high_potential_pct": "High Potential %", "avg_conversion": "Avg Conversion",
+                    "commercial_value_score": "Commercial Value Score",
+                }).style.background_gradient(subset=["Commercial Value Score"], cmap="RdYlGn"),
+                use_container_width=True, height=360, hide_index=True,
+            )
 
-            if loyal >= 20:
-                action = f"Highest affinity with Loyal Fans ({loyal:.0f}%) — ideal for premium membership or season ticket renewal campaign."
-            elif hp >= 18:
-                action = f"Strong High Potential fanbase ({hp:.0f}%) — target with first-purchase conversion offer or membership upgrade."
-            elif conv >= 60:
-                action = f"High conversion probability ({conv:.0f}/100) — prioritise for limited-edition retail or matchday hospitality upsell."
-            else:
-                action = f"Broad casual fan appeal (engagement: {eng:.0f}) — best suited for awareness campaigns and social media activation."
+            # ── Recommended commercial actions per player ─────────────────────
+            section_heading("Recommended Commercial Actions per Player")
 
-            score_c = "#c8f135" if score >= 70 else "#22c55e" if score >= 55 else "#3d9cf0"
-            st.markdown(card(
-                f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">'
-                f'  <span style="font-family:\'Syne\',sans-serif;font-size:14px;font-weight:700;color:{score_c}">{prow["player"]}</span>'
-                f'  <span style="background:#13161d;color:{score_c};border:1px solid {score_c};'
-                f'      font-size:11px;padding:3px 12px;border-radius:8px">Value Score: {score:.0f}</span>'
-                f'</div>'
-                f'<div style="display:flex;gap:16px;font-size:10px;color:#6b7280;margin-bottom:8px">'
-                f'  <span>Fans: <b style="color:#e5e7eb">{int(prow["fan_count"]):,}</b></span>'
-                f'  <span>Loyal: <b style="color:#22c55e">{loyal:.0f}%</b></span>'
-                f'  <span>High Potential: <b style="color:#3d9cf0">{hp:.0f}%</b></span>'
-                f'  <span>Avg Conversion: <b style="color:#a78bfa">{conv:.0f}</b></span>'
-                f'</div>'
-                f'<div style="font-size:10px;color:#9ca3af;border-left:2px solid {score_c};padding-left:8px">{action}</div>',
-                bg="#0d1117", border=score_c,
-            ), unsafe_allow_html=True)
+            for _, prow in player_df.head(5).iterrows():
+                score = prow["commercial_value_score"]
+                loyal = prow["loyal_fan_pct"]
+                hp    = prow["high_potential_pct"]
+                conv  = prow["avg_conversion"]
+                eng   = prow["avg_engagement"]
+
+                if loyal >= 20:
+                    action = f"Highest affinity with Loyal Fans ({loyal:.0f}%) - ideal for premium membership or season ticket renewal campaign."
+                elif hp >= 18:
+                    action = f"Strong High Potential fanbase ({hp:.0f}%) - target with first-purchase conversion offer or membership upgrade."
+                elif conv >= 60:
+                    action = f"High conversion probability ({conv:.0f}/100) - prioritise for limited-edition retail or matchday hospitality upsell."
+                else:
+                    action = f"Broad casual fan appeal (engagement: {eng:.0f}) - best suited for awareness campaigns and social media activation."
+
+                score_c = "#c8f135" if score >= 70 else "#22c55e" if score >= 55 else "#3d9cf0"
+                st.markdown(card(
+                    f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">'
+                    f'  <span style="font-family:\'Syne\',sans-serif;font-size:14px;font-weight:700;color:{score_c}">{prow["player"]}</span>'
+                    f'  <span style="background:#13161d;color:{score_c};border:1px solid {score_c};'
+                    f'      font-size:11px;padding:3px 12px;border-radius:8px">Value Score: {score:.0f}</span>'
+                    f'</div>'
+                    f'<div style="display:flex;gap:16px;font-size:10px;color:#6b7280;margin-bottom:8px">'
+                    f'  <span>Fans: <b style="color:#e5e7eb">{int(prow["fan_count"]):,}</b></span>'
+                    f'  <span>Loyal: <b style="color:#22c55e">{loyal:.0f}%</b></span>'
+                    f'  <span>High Potential: <b style="color:#3d9cf0">{hp:.0f}%</b></span>'
+                    f'  <span>Avg Conversion: <b style="color:#a78bfa">{conv:.0f}</b></span>'
+                    f'</div>'
+                    f'<div style="font-size:10px;color:#9ca3af;border-left:2px solid {score_c};padding-left:8px">{action}</div>',
+                    bg="#0d1117", border=score_c,
+                ), unsafe_allow_html=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB 6 — SPONSORSHIP INTELLIGENCE
 # ─────────────────────────────────────────────────────────────────────────────
 with tab_sponsor:
-    if "df_processed" not in st.session_state:
+    if st.session_state.get("schema_mode") == "custom":
+        _locked_tab_msg()
+    elif "df_processed" not in st.session_state:
         st.markdown(card(
             '<div style="text-align:center;color:#6b7280;font-size:12px;padding:24px">'
             'Upload a CSV in the Upload tab to unlock Sponsorship Intelligence.</div>'
@@ -2746,7 +2805,9 @@ with tab_sponsor:
 # TAB 7 — MATCHDAY INTELLIGENCE
 # ─────────────────────────────────────────────────────────────────────────────
 with tab_matchday:
-    if "df_processed" not in st.session_state:
+    if st.session_state.get("schema_mode") == "custom":
+        _locked_tab_msg()
+    elif "df_processed" not in st.session_state:
         st.markdown(card(
             '<div style="text-align:center;color:#6b7280;font-size:12px;padding:24px">'
             'Upload a CSV in the Upload tab to unlock Matchday Intelligence.</div>'
