@@ -1832,6 +1832,7 @@ with tab_upload:
                     st.session_state["col_map_auto"] = col_map_auto
                     st.session_state.pop("df_processed", None)
                     st.session_state.pop("col_map", None)
+                    st.session_state.pop("schema_mode", None)
 
                 df_raw       = st.session_state["df_raw"]
                 col_map_auto = st.session_state.get("col_map_auto", {})
@@ -2588,7 +2589,8 @@ with tab_player:
         if _df_raw_pl is not None:
             for raw_col in _df_raw_pl.columns:
                 if raw_col.strip().lower().replace(" ", "_") in ("favourite_player", "favorite_player",
-                                                                  "fav_player", "player", "preferred_player"):
+                                                                  "fav_player", "preferred_player",
+                                                                  "favourite_player_name", "favorite_player_name"):
                     _fav_player_col = raw_col
                     break
 
