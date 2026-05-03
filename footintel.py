@@ -1227,7 +1227,6 @@ def chart_acquisition_map(acq_df: pd.DataFrame) -> go.Figure:
             showframe=False, showcoastlines=True,
             projection_type="natural earth",
         ),
-        margin=dict(l=0, r=0, t=44, b=0),
     )
     return fig
 
@@ -1717,8 +1716,7 @@ def render_custom_metrics_explorer(df: pd.DataFrame, col_map: dict) -> None:
             fig = go.Figure(go.Histogram(x=num_data, nbinsx=20, marker_color="#3d9cf0", opacity=0.8))
             fig.update_layout(**PLOTLY_BASE, height=220,
                               title=dict(text=f"{col_name} — Distribution{corr_txt}", x=0.02, y=0.97),
-                              xaxis=dict(gridcolor="#1f2937"), yaxis=dict(gridcolor="#1f2937"),
-                              margin=dict(l=8, r=8, t=40, b=8))
+                              xaxis=dict(gridcolor="#1f2937"), yaxis=dict(gridcolor="#1f2937"))
             st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False},
                             key=f"custom_{col_name}_hist")
         else:
@@ -1734,15 +1732,13 @@ def render_custom_metrics_explorer(df: pd.DataFrame, col_map: dict) -> None:
                 fig.update_layout(**PLOTLY_BASE, height=240, barmode="stack",
                                   title=dict(text=f"{col_name} — Segment Breakdown", x=0.02, y=0.97),
                                   xaxis=dict(gridcolor="#1f2937"), yaxis=dict(gridcolor="#1f2937"),
-                                  legend=dict(bgcolor="#13161d", bordercolor="#1f2937", borderwidth=1, font_size=9),
-                                  margin=dict(l=8, r=8, t=40, b=8))
+                                  legend=dict(bgcolor="#13161d", bordercolor="#1f2937", borderwidth=1, font_size=9))
             else:
                 vc = df[col_name].astype(str).value_counts().head(10)
                 fig = go.Figure(go.Bar(x=vc.index, y=vc.values, marker_color="#c8f135"))
                 fig.update_layout(**PLOTLY_BASE, height=220,
                                   title=dict(text=f"{col_name} — Value Counts", x=0.02, y=0.97),
-                                  xaxis=dict(gridcolor="#1f2937"), yaxis=dict(gridcolor="#1f2937"),
-                                  margin=dict(l=8, r=8, t=40, b=8))
+                                  xaxis=dict(gridcolor="#1f2937"), yaxis=dict(gridcolor="#1f2937"))
             st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False},
                             key=f"custom_{col_name}_bar")
 
