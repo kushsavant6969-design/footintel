@@ -997,7 +997,15 @@ def segment_summary(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _pdf_safe(text: str) -> str:
-    return str(text).encode("latin-1", errors="replace").decode("latin-1")
+    return (
+        str(text)
+        .replace("\u2014", " - ")   # em dash
+        .replace("\u2013", "-")     # en dash
+        .replace("\u2022", "-")     # bullet
+        .replace("\u00b7", ".")     # middle dot
+        .encode("latin-1", errors="replace")
+        .decode("latin-1")
+    )
 
 
 def generate_pdf_report(df: pd.DataFrame, club_name: str) -> bytes:
@@ -1511,7 +1519,7 @@ def generate_sponsor_pdf(df: pd.DataFrame, club_name: str) -> bytes:
     pdf.ln(4)
     pdf.set_font("Helvetica", "B", 14)
     score_label = "Excellent" if pitch_score >= 75 else "Good" if pitch_score >= 55 else "Developing"
-    pdf.cell(0, 8, f"Sponsorship Pitch Score: {pitch_score}/100  —  {score_label}", ln=True, align="C")
+    pdf.cell(0, 8, _pdf_safe(f"Sponsorship Pitch Score: {pitch_score}/100  -  {score_label}"), ln=True, align="C")
     pdf.ln(4)
     pdf.line(12, pdf.get_y(), 198, pdf.get_y())
     pdf.ln(6)
@@ -1572,7 +1580,7 @@ def generate_sponsor_pdf(df: pd.DataFrame, club_name: str) -> bytes:
     pdf.set_y(-15)
     pdf.set_font("Helvetica", "I", 8)
     pdf.set_text_color(150, 150, 150)
-    pdf.cell(0, 10, f"FootIntel  |  {today_str}  |  CONFIDENTIAL — NOT FOR DISTRIBUTION", align="C")
+    pdf.cell(0, 10, _pdf_safe(f"FootIntel  |  {today_str}  |  CONFIDENTIAL - NOT FOR DISTRIBUTION"), align="C")
     return bytes(pdf.output())
 
 
