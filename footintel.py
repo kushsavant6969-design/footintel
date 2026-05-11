@@ -2464,8 +2464,10 @@ with tab_report:
 # TAB 4 — FAN ACQUISITION
 # ─────────────────────────────────────────────────────────────────────────────
 with tab_acquisition:
-    if st.session_state.get("schema_mode") == "custom" or "df_processed" not in st.session_state:
-        _locked_tab_msg() if st.session_state.get("schema_mode") == "custom" else st.markdown(card(
+    if st.session_state.get("schema_mode") == "custom":
+        _locked_tab_msg()
+    elif "df_processed" not in st.session_state:
+        st.markdown(card(
             '<div style="text-align:center;color:#6b7280;font-size:12px;padding:24px">'
             'Upload a CSV in the Upload tab to unlock Fan Acquisition intelligence.</div>'
         ), unsafe_allow_html=True)
