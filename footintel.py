@@ -1,3 +1,9 @@
+try:
+    from rapidfuzz import fuzz as rfuzz
+    HAS_RAPIDFUZZ = True
+except ImportError:
+    HAS_RAPIDFUZZ = False
+
 import streamlit as st
 import plotly.graph_objects as go
 import plotly.express as px
@@ -244,6 +250,45 @@ def section_heading(text: str) -> None:
         f'color:#e5e7eb;margin:28px 0 14px">{text}</div>',
         unsafe_allow_html=True,
     )
+
+
+def insight_banner(s1: str, s2: str) -> None:
+    """Gold left-border dark insight card — 2 sentences."""
+    st.markdown(
+        '<div style="background:#13161d;border-left:4px solid #c8a800;'
+        'border-radius:8px;padding:14px 20px;margin-bottom:20px">'
+        '<span style="color:#c8a800;font-size:10px;text-transform:uppercase;'
+        'letter-spacing:.12em;font-weight:600">AI Insight</span><br>'
+        f'<span style="color:#f3f4f6;font-size:13px;line-height:1.7">'
+        f'{s1} {s2}</span></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def detect_columns_scored(df) -> tuple:
+    """(high_conf, low_conf, unmatched_set)."""
+    df_norm = {_norm(c): c for c in df.columns}
+    high_conf, low_conf, unmatched_set = {}, {}, set()
+    for field, aliases in COLUMN_ALIASES.items():
+        best_col, best_score = None, 0
+        for alias in aliases:
+            key = _norm(alias)
+            if key in df_norm:
+                best_col = df_norm[key]
+                best_score = 100
+                break
+        if best_score < 85 and HAS_RAPIDFUZZ:
+            for csv_norm, csv_orig in df_norm.items():
+                s = max(rfuzz.ratio(csv_norm, _norm(a)) for a in aliases)
+                if s > best_score:
+                    best_score, best_col = s, csv_orig
+        if best_score >= 85:
+            high_conf[field] = best_col
+        elif best_score >= 50 and best_col:
+            low_conf[field] = (best_col, round(best_score))
+        else:
+            unmatched_set.add(field)
+    return high_conf, low_conf, unmatched_set
 
 
 def get_upload_state(col_map: dict) -> tuple[str, set]:
@@ -1776,8 +1821,9 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-tab_upload, tab_dashboard, tab_acquisition, tab_player, tab_sponsor, tab_matchday, tab_report = st.tabs([
+tab_upload, tab_howto, tab_dashboard, tab_acquisition, tab_player, tab_sponsor, tab_matchday, tab_report = st.tabs([
     "⬆  Upload & Configure",
+    "📖  How To Use",
     "📊  Dashboard",
     "🌍  Fan Acquisition",
     "⚽  Player Intelligence",
@@ -1899,134 +1945,203 @@ with tab_upload:
             '</div>'
         ), unsafe_allow_html=True)
 
-    # ── Column mapping form ────────────────────────────────────────────────────
+    # ── Smart column mapping ─────────────────────────────────────────────────
     if "df_raw" in st.session_state and "df_processed" not in st.session_state:
         df_raw       = st.session_state["df_raw"]
         col_map_auto = st.session_state.get("col_map_auto", {})
-        csv_cols     = list(df_raw.columns)
-        options      = ["— not mapped —"] + csv_cols
+        high_conf, low_conf, unmatched_set = detect_columns_scored(df_raw)
+        csv_cols = list(df_raw.columns)
+        opts     = ["— not mapped —"] + csv_cols
+        needs_human = bool(low_conf or unmatched_set)
 
         st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
-        section_heading("Map Your Columns")
-        st.markdown(card(
-            f'<div style="font-size:11px;color:#9ca3af">'
-            f'Review and confirm the column mapping. Fields auto-matched from your CSV are pre-filled. '
-            f'<b style="color:#c8f135">Missing columns will use neutral scores — map as many as possible for accuracy.</b><br><br>'
-            f'<span style="color:#22c55e">{len(df_raw):,} fans loaded</span> &nbsp;·&nbsp; '
-            f'<span style="color:#22c55e">{len(df_raw.columns)} columns detected</span> &nbsp;·&nbsp; '
-            f'<span style="color:#c8f135">{len(col_map_auto)} auto-matched</span>'
-            f'</div>'
-        ), unsafe_allow_html=True)
 
-        # "We think these might match" — show auto-detected pairs prominently
-        if col_map_auto:
-            pairs_html = "".join(
-                f'<div style="display:inline-flex;align-items:center;gap:6px;'
-                f'background:#0a1a2e;border:1px solid #1d4ed8;border-radius:6px;'
-                f'padding:4px 10px;margin:3px 4px 3px 0;font-size:10px">'
-                f'<span style="color:#6b7280">{FIELD_LABELS.get(field, field)}</span>'
-                f'<span style="color:#374151">→</span>'
-                f'<span style="color:#3d9cf0">{csv_col}</span>'
-                f'</div>'
-                for field, csv_col in sorted(col_map_auto.items())
-            )
+        if not needs_human:
+            # All columns matched at high confidence — success screen
             st.markdown(
-                f'<div style="background:#0a0c10;border:1px solid #1d4ed8;border-radius:8px;'
-                f'padding:12px 16px;margin-bottom:10px">'
-                f'<div style="font-size:10px;color:#3d9cf0;font-weight:600;margin-bottom:8px;'
-                f'text-transform:uppercase;letter-spacing:.08em">'
-                f'✦ We think these columns match — confirm or reassign below</div>'
-                f'{pairs_html}</div>',
+                '<div style="background:#052e16;border:1px solid #166534;'
+                'border-radius:10px;padding:16px 20px;margin-bottom:20px">'
+                '<span style="color:#22c55e;font-size:14px;font-weight:700">'
+                '&#10003; All columns matched successfully.</span></div>',
                 unsafe_allow_html=True,
             )
-
-        def _idx(field: str) -> int:
-            v = col_map_auto.get(field)
-            return options.index(v) if v and v in options else 0
-
-        GRP_STYLE = (
-            '<div style="font-size:10px;color:#6b7280;text-transform:uppercase;'
-            'letter-spacing:.08em;margin:14px 0 6px">'
-        )
-
-        with st.form("col_mapping_form"):
-            st.markdown(GRP_STYLE + "Identifiers &amp; Demographics</div>", unsafe_allow_html=True)
-            d1, d2, d3, d4 = st.columns(4)
-            uid = d1.selectbox("User ID",         options, index=_idx("user_id"),  key="map_user_id")
-            age = d2.selectbox("Age",              options, index=_idx("age"),      key="map_age")
-            gen = d3.selectbox("Gender",           options, index=_idx("gender"),   key="map_gender")
-            cty = d4.selectbox("Country / Region", options, index=_idx("country"),  key="map_country")
-
-            st.markdown(GRP_STYLE + "Fan Profile</div>", unsafe_allow_html=True)
-            p1, p2, p3, _ = st.columns(4)
-            mcat = p1.selectbox("Membership Category", options, index=_idx("membership_category"), key="map_membership_category")
-            ftyp = p2.selectbox("Fan Type",            options, index=_idx("fan_type"),            key="map_fan_type")
-            happ = p3.selectbox("Has App (Yes/No)",    options, index=_idx("has_app"),             key="map_has_app")
-
-            st.markdown(GRP_STYLE + "Email Channel</div>", unsafe_allow_html=True)
-            e1, e2, e3, e4 = st.columns(4)
-            emo  = e1.selectbox("Email Opens",              options, index=_idx("email_opens"),              key="map_email_opens")
-            ecl  = e2.selectbox("Email Clicks",             options, index=_idx("email_clicks"),             key="map_email_clicks")
-            ecr  = e3.selectbox("Email Campaigns Received", options, index=_idx("email_campaigns_received"), key="map_email_campaigns_received")
-            leo  = e4.selectbox("Last Email Open",          options, index=_idx("last_email_open"),          key="map_last_email_open")
-
-            st.markdown(GRP_STYLE + "In-App Channel</div>", unsafe_allow_html=True)
-            i1, i2, i3, i4 = st.columns(4)
-            iao  = i1.selectbox("InApp Opens",              options, index=_idx("inapp_opens"),              key="map_inapp_opens")
-            icl  = i2.selectbox("InApp Clicks",             options, index=_idx("inapp_clicks"),             key="map_inapp_clicks")
-            icr  = i3.selectbox("InApp Campaigns Received", options, index=_idx("inapp_campaigns_received"), key="map_inapp_campaigns_received")
-            lao  = i4.selectbox("Last App Open",            options, index=_idx("last_app_open"),            key="map_last_app_open")
-
-            st.markdown(GRP_STYLE + "Content &amp; Article Engagement</div>", unsafe_allow_html=True)
-            c1, c2, c3, _ = st.columns(4)
-            arv  = c1.selectbox("Article Views",        options, index=_idx("article_views"),    key="map_article_views")
-            fav  = c2.selectbox("First Article View",   options, index=_idx("first_article_view"), key="map_first_article_view")
-            lav  = c3.selectbox("Last Article View",    options, index=_idx("last_article_view"),  key="map_last_article_view")
-
-            st.markdown(GRP_STYLE + "Commercial</div>", unsafe_allow_html=True)
-            m1, m2, m3, m4 = st.columns(4)
-            tix  = m1.selectbox("Ticket Purchases",     options, index=_idx("ticket_purchases"),     key="map_ticket_purchases")
-            msp  = m2.selectbox("Membership Purchases", options, index=_idx("membership_purchases"), key="map_membership_purchases")
-            ret  = m3.selectbox("Retail Purchases",     options, index=_idx("retail_purchases"),     key="map_retail_purchases")
-            rev  = m4.selectbox("Total Revenue",        options, index=_idx("total_revenue"),        key="map_total_revenue")
-
-            st.markdown(GRP_STYLE + "Date Columns</div>", unsafe_allow_html=True)
-            t1, t2, t3, t4 = st.columns(4)
-            fpd  = t1.selectbox("First Purchase Date", options, index=_idx("first_purchase_date"), key="map_first_purchase_date")
-            lpd  = t2.selectbox("Last Purchase Date",  options, index=_idx("last_purchase_date"),  key="map_last_purchase_date")
-            fao  = t3.selectbox("First App Open",      options, index=_idx("first_app_open"),      key="map_first_app_open")
-            jnd  = t4.selectbox("Join Date",           options, index=_idx("join_date"),           key="map_join_date")
-
-            st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
-            submitted = st.form_submit_button("✓  Confirm Mapping & Analyse Fans")
-
-            if submitted:
-                raw_sel = {
-                    "user_id": uid, "age": age, "gender": gen, "country": cty,
-                    "membership_category": mcat, "fan_type": ftyp, "has_app": happ,
-                    "email_opens": emo, "email_clicks": ecl, "email_campaigns_received": ecr,
-                    "last_email_open": leo,
-                    "inapp_opens": iao, "inapp_clicks": icl, "inapp_campaigns_received": icr,
-                    "last_app_open": lao,
-                    "article_views": arv, "first_article_view": fav, "last_article_view": lav,
-                    "ticket_purchases": tix, "membership_purchases": msp, "retail_purchases": ret,
-                    "total_revenue": rev,
-                    "first_purchase_date": fpd, "last_purchase_date": lpd,
-                    "first_app_open": fao, "join_date": jnd,
-                }
-                confirmed_map = {f: v for f, v in raw_sel.items() if v != "— not mapped —"}
-                st.session_state["col_map"] = confirmed_map
-
-                _state_check, _missing_check = get_upload_state(confirmed_map)
-                if _state_check == "custom":
-                    # Fewer than 5 core columns — skip scoring engine entirely
+            rows_html = ""
+            for field, csv_col in sorted(high_conf.items()):
+                label = FIELD_LABELS.get(field, field.replace("_", " ").title())
+                rows_html += (
+                    f'<div style="display:flex;justify-content:space-between;'
+                    f'padding:8px 0;border-bottom:1px solid #1f2937">'
+                    f'<span style="color:#9ca3af;font-size:12px">{label}</span>'
+                    f'<span style="color:#22c55e;font-size:12px;font-weight:600">{csv_col}</span>'
+                    f'</div>'
+                )
+            st.markdown(
+                f'<div style="background:#13161d;border:1px solid #2a2f3d;'
+                f'border-radius:10px;padding:16px 20px;margin-bottom:24px">{rows_html}</div>',
+                unsafe_allow_html=True,
+            )
+            confirmed_map = dict(high_conf)
+            if st.button("\u2713  Confirm and Analyse Fans", key="confirm_all_matched"):
+                _sc, _ms = get_upload_state(confirmed_map)
+                if _sc == "custom":
                     st.session_state.pop("df_processed", None)
                     st.session_state["schema_mode"] = "custom"
                 else:
-                    df_proc = process_data(df_raw, confirmed_map)
-                    st.session_state["df_processed"] = df_proc
-                    st.session_state["schema_mode"] = _state_check  # "full" or "partial"
+                    st.session_state["df_processed"] = process_data(df_raw, confirmed_map)
+                    st.session_state["schema_mode"] = _sc
+                st.session_state["col_map"] = confirmed_map
                 st.rerun()
+
+        else:
+            # Mixed — read-only list for high_conf, dropdowns for the rest
+            section_heading("Map Your Columns")
+            st.markdown(
+                f'<div style="font-size:11px;color:#9ca3af;margin-bottom:14px">'
+                f'{len(high_conf)} field(s) matched automatically. '
+                f'Resolve the fields below before proceeding.</div>',
+                unsafe_allow_html=True,
+            )
+            if high_conf:
+                rows_html = "".join(
+                    f'<div style="display:flex;justify-content:space-between;'
+                    f'padding:6px 0;border-bottom:1px solid #1f2937">'
+                    f'<span style="color:#6b7280;font-size:11px">'
+                    f'{FIELD_LABELS.get(fld, fld.replace("_"," ").title())}</span>'
+                    f'<span style="color:#22c55e;font-size:11px">{col} &#10003;</span>'
+                    f'</div>'
+                    for fld, col in sorted(high_conf.items())
+                )
+                st.markdown(
+                    f'<div style="background:#13161d;border:1px solid #2a2f3d;'
+                    f'border-radius:8px;padding:12px 16px;margin-bottom:14px">'
+                    f'<span style="color:#22c55e;font-size:10px;font-weight:600;'
+                    f'text-transform:uppercase;letter-spacing:.1em">Auto Matched</span>'
+                    f'{rows_html}</div>',
+                    unsafe_allow_html=True,
+                )
+            confirmed_map = dict(high_conf)
+            if low_conf:
+                st.markdown(
+                    f'<div style="background:#1c1500;border:1px solid #92400e;'
+                    f'border-radius:8px;padding:10px 16px;margin-bottom:10px">'
+                    f'<span style="color:#f59e0b;font-size:11px;font-weight:600">'
+                    f'\u26a0 LOW CONFIDENCE \u2014 {len(low_conf)} field(s) need confirmation'
+                    f'</span></div>',
+                    unsafe_allow_html=True,
+                )
+                for field, (csv_col, score) in sorted(low_conf.items()):
+                    c1, c2, c3 = st.columns([2, 2, 1])
+                    with c1:
+                        st.markdown(
+                            f'<div style="color:#f59e0b;font-size:12px;padding:8px 0">'
+                            f'<strong>{FIELD_LABELS.get(field, field.replace("_"," ").title())}</strong></div>',
+                            unsafe_allow_html=True,
+                        )
+                    with c2:
+                        idx = opts.index(csv_col) if csv_col in opts else 0
+                        sel = st.selectbox("_lc_"+field, opts, index=idx,
+                                           label_visibility="collapsed", key="mlc_"+field)
+                    with c3:
+                        st.markdown(f'<div style="color:#f59e0b;font-size:11px;padding:8px 0">{score}%</div>',
+                                    unsafe_allow_html=True)
+                    if sel != "— not mapped —":
+                        confirmed_map[field] = sel
+            if unmatched_set:
+                st.markdown(
+                    f'<div style="background:#1f0a0a;border:1px solid #991b1b;'
+                    f'border-radius:8px;padding:10px 16px;margin-bottom:10px;margin-top:6px">'
+                    f'<span style="color:#ef4444;font-size:11px;font-weight:600">'
+                    f'\u2717 UNMATCHED \u2014 {len(unmatched_set)} field(s) \u2014 assign or leave unmapped'
+                    f'</span></div>',
+                    unsafe_allow_html=True,
+                )
+                for field in sorted(unmatched_set):
+                    c1, c2 = st.columns([2, 3])
+                    with c1:
+                        st.markdown(
+                            f'<div style="color:#ef4444;font-size:12px;padding:8px 0">'
+                            f'<strong>{FIELD_LABELS.get(field, field.replace("_"," ").title())}</strong></div>',
+                            unsafe_allow_html=True,
+                        )
+                    with c2:
+                        sel = st.selectbox("_um_"+field, opts, index=0,
+                                           label_visibility="collapsed", key="mum_"+field)
+                    if sel != "— not mapped —":
+                        confirmed_map[field] = sel
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("\u2713  Confirm Mapping & Analyse Fans", key="confirm_mapping_mixed"):
+                _sc, _ms = get_upload_state(confirmed_map)
+                if _sc == "custom":
+                    st.session_state.pop("df_processed", None)
+                    st.session_state["schema_mode"] = "custom"
+                else:
+                    st.session_state["df_processed"] = process_data(df_raw, confirmed_map)
+                    st.session_state["schema_mode"] = _sc
+                st.session_state["col_map"] = confirmed_map
+                st.rerun()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HOW TO USE
+# ─────────────────────────────────────────────────────────────────────────────
+with tab_howto:
+    st.markdown(
+        '<h2 style="font-family:\'Syne\',sans-serif;color:#e5e7eb;font-size:26px;'
+        'font-weight:800;margin-bottom:4px">How To Use FootIntel</h2>'
+        '<p style="color:#6b7280;font-size:13px;margin-bottom:28px">'
+        'A step-by-step guide for marketing managers.</p>',
+        unsafe_allow_html=True,
+    )
+    _HT_STEPS = [
+        ("Prepare Your Data",
+         "Your CSV needs fan-level data with one row per fan. The more columns you include, "
+         "the richer your analysis. At minimum you need a Fan ID, Membership Category, "
+         "and some engagement or purchase history."),
+        ("Upload and Confirm Mapping",
+         "Upload your CSV and FootIntel will automatically detect and map your columns. "
+         "Review the auto-matched fields, confirm any amber ones, assign any red ones manually. "
+         "Hit Confirm and Analyse Fans to proceed."),
+        ("Understand Your Fan Dashboard",
+         "Your dashboard shows how your fanbase splits across 5 segments and scores every fan "
+         "across Engagement, Commercial, Loyalty, Churn Risk, and Conversion. "
+         "Start here to get the big picture."),
+        ("Identify Your At-Risk Fans",
+         "The Dashboard's Churn Risk panel shows fans most likely to lapse in the next 90 days, "
+         "ranked by churn risk score. This is your weekly action list. "
+         "Focus on Win Back and Dormant fans first."),
+        ("Build Your Sponsorship Pitch",
+         "Go to Sponsorship Intelligence and scroll to the Sponsor Category Recommendations. "
+         "Download the Sponsorship Deck PDF and take it directly into your next sponsor conversation."),
+        ("Export and Act",
+         "Use the Campaign Generator on the Fan Dashboard to download a targeted fan list "
+         "and a ready-to-use email template for any segment. "
+         "Upload the fan list to your CRM and send the email. Done."),
+    ]
+    for _i, (_title, _body) in enumerate(_HT_STEPS, 1):
+        st.markdown(
+            f'<div style="display:flex;gap:20px;align-items:flex-start;'
+            f'background:#13161d;border:1px solid #2a2f3d;border-radius:10px;'
+            f'padding:20px 22px;margin-bottom:12px">'
+            f'<div style="min-width:38px;height:38px;background:#c8a800;'
+            f'border-radius:50%;display:flex;align-items:center;justify-content:center;'
+            f'font-family:\'Syne\',sans-serif;font-weight:800;color:#0a0c10;'
+            f'font-size:16px;flex-shrink:0">{_i}</div>'
+            f'<div>'
+            f'<div style="font-family:\'Syne\',sans-serif;font-weight:700;'
+            f'color:#e5e7eb;font-size:15px;margin-bottom:6px">{_title}</div>'
+            f'<div style="color:#9ca3af;font-size:12px;line-height:1.75">{_body}</div>'
+            f'</div></div>',
+            unsafe_allow_html=True,
+        )
+    st.markdown(
+        '<div style="background:#052e16;border:1px solid #166534;border-radius:10px;'
+        'padding:16px 22px;margin-top:16px;text-align:center">'
+        '<span style="color:#22c55e;font-size:13px">'
+        'Need help or want to connect your own data? '
+        'Built by <strong>Kush Savant</strong>, MSc Sports Analytics, '
+        'Loughborough University London.</span></div>',
+        unsafe_allow_html=True,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2073,6 +2188,19 @@ with tab_dashboard:
             )
 
         heading = f"{club_name} — Fan Dashboard" if club_name else "Fan Dashboard"
+
+        # ── Insight banner ──────────────────────────────────────────────────
+        _sc = df_all["segment"].value_counts()
+        _ts = _sc.idxmax(); _tn = int(_sc.max())
+        _ac = df_all[df_all["segment"] == _ts]["churn_risk_index"].mean()
+        _s1 = (f"{_tn:,} of your fans are in the {_ts} segment with an average "
+               f"churn risk of {_ac:.0f} \u2014 your biggest volume risk this period.")
+        if "age_group" in df_all.columns:
+            _ta = df_all.groupby("age_group")["churn_risk_index"].mean().idxmax()
+            _s2 = f"Focus retention spend on the {_ta} age group where churn pressure is highest."
+        else:
+            _s2 = "Add demographic data to unlock age-level churn targeting recommendations."
+        insight_banner(_s1, _s2)
         st.markdown(
             f'<div style="font-family:\'Syne\',sans-serif;font-size:20px;font-weight:700;'
             f'color:#e5e7eb;margin-bottom:12px">{heading}</div>',
@@ -2294,7 +2422,34 @@ with tab_dashboard:
                             bg="#0d1117", border=info["color"],
                         ), unsafe_allow_html=True)
 
-            # ── Top 20 fans ────────────────────────────────────────────────────
+            # ── Campaign Generator ─────────────────────────────────────────
+            section_heading("Campaign Generator")
+            st.markdown(card(
+                '<div style="font-size:11px;color:#9ca3af">Download a targeted fan list and '
+                'ready-to-use email template for any segment.</div>'
+            ), unsafe_allow_html=True)
+            _cg_segs   = list(SEGMENT_INFO.keys())
+            _cg_choice = st.selectbox("Select Segment", _cg_segs, key="cg_seg_select")
+            _cg_fans   = df_all[df_all["segment"] == _cg_choice].copy()
+            _cg_cols   = [c for c in [
+                col_map_stored.get("user_id"), "segment", "engagement_score",
+                "commercial_score", "churn_risk_index", "channel_preference",
+                col_map_stored.get("membership_category"),
+            ] if c and c in _cg_fans.columns]
+            if _cg_cols:
+                _cg_csv = _cg_fans[list(dict.fromkeys(_cg_cols))].to_csv(index=False).encode()
+                st.download_button(
+                    f"Download {_cg_choice} Fan List ({len(_cg_fans):,} fans)",
+                    data=_cg_csv,
+                    file_name=f"{club_name or 'footintel'}_{_cg_choice.lower().replace(' ','_')}_fans.csv",
+                    mime="text/csv", key="cg_download_btn",
+                )
+            _cg_fn  = _EMAIL_TEMPLATES.get(_cg_choice)
+            _cg_txt = _cg_fn(club_name or "Your Club") if _cg_fn else ""
+            st.text_area("Email Template", value=_cg_txt, height=280, key="cg_email_tmpl")
+            st.caption("Copy the template above, paste into your email platform, and personalise [First Name].")
+
+            # ── Top 20 fans ────────────────────────────────────────────────
             section_heading("Top 20 Fans by Composite Score")
             display_cols = (
                 [col_map_stored["user_id"]] if "user_id" in col_map_stored else []
@@ -2309,6 +2464,31 @@ with tab_dashboard:
                 use_container_width=True, height=420,
             )
 
+
+
+
+_EMAIL_TEMPLATES = {
+    "Win Back":       lambda c: f"Subject: We miss you at {c}\n\nHi [First Name],\n\n"
+                                f"It's been a while since we last saw you at {c} and we wanted to reach out personally.\n\n"
+                                f"This season has been one to remember. Use code MISSYOU20 for 20% off your next ticket.\n\n"
+                                f"Come back and remind yourself why you love {c}.\n\nWarm regards,\n{c} Fan Engagement Team",
+    "High Potential": lambda c: f"Subject: Your next step with {c}\n\nHi [First Name],\n\n"
+                                f"You're one of our most engaged fans and we think it's time to make it official.\n\n"
+                                f"Becoming a member of {c} means early access, exclusive events and priority seating.\n\n"
+                                f"We're offering a new member trial — your first month is on us.\n\n{c} Membership Team",
+    "Loyal Fans":     lambda c: f"Subject: Thank you for your loyalty to {c}\n\nHi [First Name],\n\n"
+                                f"We don't say it often enough — but thank you. Your support means everything.\n\n"
+                                f"As a loyal member you get priority ticket selection, an exclusive gift, "
+                                f"and an invitation to our pre-season event.\n\nYour Early Access window opens soon.\n\nWith gratitude,\n{c} Club Management",
+    "Dormant":        lambda c: f"Subject: It's been a while — we'd love to see you at {c}\n\nHi [First Name],\n\n"
+                                f"We miss having you in the stands at {c}.\n\n"
+                                f"We're offering a Welcome Back package — a pair of tickets at half price.\n\n"
+                                f"Reply to claim your offer.\n\n{c} Fan Engagement Team",
+    "Casual":         lambda c: f"Subject: Make your mark at {c} this season\n\nHi [First Name],\n\n"
+                                f"Every great fan story starts with showing up more often.\n\n"
+                                f"We've put together multi-match bundles so you can plan your season and save.\n\n"
+                                f"Check out our bundle offers at {c} — the stands are better with you in them.\n\n{c} Fan Engagement Team",
+}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB 3 — REPORT
@@ -2334,6 +2514,16 @@ with tab_report:
         today_str = datetime.today().strftime("%Y-%m-%d")
 
         report_title = f"{club_name} Fan Segmentation Report" if club_name else "Fan Segmentation Report"
+
+        # ── Insight banner ──────────────────────────────────────────────────
+        _rp_loyal = int((df["segment"] == "Loyal Fans").sum())
+        _rp_hp    = int((df["segment"] == "High Potential").sum())
+        _rp_avg   = df["commercial_score"].mean()
+        _rp_s1 = (f"This report covers {total:,} fans: {_rp_loyal:,} Loyal Fans and "
+                  f"{_rp_hp:,} High Potential fans, with an average commercial score of {_rp_avg:.0f}.")
+        _rp_s2 = ("Use the segment breakdown below to identify conversion opportunities "
+                  "and share this report with commercial and ticketing stakeholders.")
+        insight_banner(_rp_s1, _rp_s2)
         st.markdown(
             f'<div style="font-family:\'Syne\',sans-serif;font-size:17px;font-weight:700;'
             f'color:#e5e7eb;margin-bottom:16px">{report_title}</div>',
@@ -2486,6 +2676,18 @@ with tab_acquisition:
 
         acq_df = compute_acquisition_data(df_acq, col_acq)
 
+        if not acq_df.empty:
+            _at = acq_df.iloc[0]
+            _s1 = (f"{_at['country']} is your highest-priority acquisition market "
+                   f"with a priority score of {_at['acquisition_score']:.0f} "
+                   f"and {int(_at['fan_count']):,} fans already in your database.")
+            _hi = acq_df[acq_df["acquisition_score"] >= 70]
+            _s2 = (f"You have {len(_hi)} market(s) scoring above 70 \u2014 "
+                   f"prioritise digital acquisition campaigns in these regions first."
+                   if len(_hi) > 1 else
+                   "Focus acquisition budget on your top market before expanding to lower-priority regions.")
+            insight_banner(_s1, _s2)
+
         if acq_df.empty:
             st.markdown(card(
                 '<div style="font-size:11px;color:#9ca3af;padding:12px">Map a <b style="color:#c8f135">Country / Region</b> '
@@ -2599,6 +2801,17 @@ with tab_player:
         has_player_col = _fav_player_col is not None
 
         heading   = f"{club_name} - Player Intelligence" if club_name else "Player Intelligence"
+
+        # ── Insight banner ──────────────────────────────────────────────────
+        _pl_loyal  = int((df_pl["segment"] == "Loyal Fans").sum())
+        _pl_hp     = int((df_pl["segment"] == "High Potential").sum())
+        _pl_wb     = int((df_pl["segment"] == "Win Back").sum())
+        _pl_s1 = (f"You have {_pl_loyal:,} Loyal Fans and {_pl_hp:,} High Potential fans \u2014 "
+                  f"your most commercially valuable audience for player-led campaigns.")
+        _pl_s2 = (f"Target Win Back fans ({_pl_wb:,}) with personalised player content "
+                  f"to re-engage lapsed supporters at low acquisition cost.")
+        insight_banner(_pl_s1, _pl_s2)
+
         st.markdown(
             f'<div style="font-family:\'Syne\',sans-serif;font-size:20px;font-weight:700;'
             f'color:#e5e7eb;margin-bottom:4px">{heading}</div>'
@@ -2723,6 +2936,17 @@ with tab_sponsor:
             unsafe_allow_html=True,
         )
 
+        # ── Insight banner ──────────────────────────────────────────────────
+        _sp_pitch = compute_sponsorship_pitch_score(df_sp)
+        _sp_loyal = df_sp[df_sp["segment"] == "Loyal Fans"]["commercial_score"].mean()
+        _sp_hp    = int((df_sp["segment"] == "High Potential").sum())
+        _sp_s1 = (f"Your Loyal Fans average a commercial score of {_sp_loyal:.0f} "
+                  f"and your overall pitch score is {_sp_pitch:.0f}/100 \u2014 "
+                  f"a strong foundation for premium brand and financial services partners.")
+        _sp_s2 = (f"Converting your {_sp_hp:,} High Potential fans to membership "
+                  f"would meaningfully lift your commercial score and sponsorship valuation.")
+        insight_banner(_sp_s1, _sp_s2)
+
         pitch_score = compute_sponsorship_pitch_score(df_sp)
         pitch_color = "#22c55e" if pitch_score >= 70 else "#f59e0b" if pitch_score >= 50 else "#ef4444"
         pitch_label = "Excellent" if pitch_score >= 70 else "Good" if pitch_score >= 50 else "Developing"
@@ -2829,6 +3053,16 @@ with tab_matchday:
             f'Revenue figures are <b style="color:#f59e0b">estimated</b> from segment-level commercial scores.</div>',
             unsafe_allow_html=True,
         )
+
+        # ── Insight banner ──────────────────────────────────────────────────
+        _md_tmp = compute_matchday_data(df_md_tab, col_md)
+        _md_rev = _md_tmp["rev_by_seg"]["estimated_revenue"].sum() if "estimated_revenue" in _md_tmp["rev_by_seg"].columns else 0
+        _md_hosp = len(_md_tmp.get("hospitality_targets", []))
+        _md_s1 = (f"Estimated matchday revenue across all segments is \u00a3{_md_rev:,.0f} \u2014 "
+                  f"with hospitality upsell opportunities identified for {_md_hosp} fan profiles.")
+        _md_s2 = ("Focus pre-match communications on High Potential and Loyal Fan segments "
+                  "to maximise hospitality conversion and merchandise spend per head.")
+        insight_banner(_md_s1, _md_s2)
 
         md_data = compute_matchday_data(df_md_tab, col_md)
         rev_df  = md_data["rev_by_seg"]
