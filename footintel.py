@@ -337,8 +337,8 @@ def compute_rps(ownership: dict, aqi: dict, valuation: dict) -> dict:
 _L = dict(
     paper_bgcolor="#13161d", plot_bgcolor="#13161d",
     font=dict(family="DM Mono, monospace", color="#9ca3af", size=11),
-    margin=dict(l=0, r=0, t=30, b=0),
 )
+_M = dict(l=0, r=0, t=30, b=0)  # default margin — pass explicitly to avoid duplicate kwarg
 
 
 def chart_ownership_donut(ownership: dict) -> go.Figure:
@@ -352,7 +352,7 @@ def chart_ownership_donut(ownership: dict) -> go.Figure:
     fig.add_annotation(text=f"<b>{ownership['owned_pct']:.0f}%</b><br>Owned",
                        x=0.5, y=0.5, showarrow=False,
                        font=dict(size=14, color="#e5e7eb", family="Syne"))
-    fig.update_layout(**_L, height=260,
+    fig.update_layout(**_L, margin=_M, height=260,
                       legend=dict(orientation="v", x=1.0, y=0.5, font=dict(size=10, color="#9ca3af")))
     return fig
 
@@ -388,7 +388,7 @@ def chart_valuation_bars(valuation: dict) -> go.Figure:
         text=[f"£{v:,.0f}" for v in [valuation["shirt"], valuation["stadium"], valuation["digital"]]],
         textposition="outside", textfont=dict(size=10, color="#e5e7eb"),
     ))
-    fig.update_layout(**_L, height=260,
+    fig.update_layout(**_L, margin=_M, height=260,
                       yaxis=dict(showgrid=False, showticklabels=False),
                       xaxis=dict(showgrid=False, tickfont=dict(size=10, color="#9ca3af")))
     return fig
@@ -406,7 +406,7 @@ def chart_rps_gauge(rps: float) -> go.Figure:
                           dict(range=[70, 100], color="#052e16")],
                    threshold=dict(line=dict(color="#9ca3af", width=2), thickness=0.75, value=BENCHMARK_RPS)),
     ))
-    fig.update_layout(**_L, height=240, margin=dict(l=20, r=20, t=20, b=0))
+    fig.update_layout(**_L, margin=dict(l=20, r=20, t=20, b=0), height=240)
     return fig
 
 
@@ -426,10 +426,9 @@ def chart_benchmark_position(rps: float) -> go.Figure:
                              hovertemplate=f"Rights Premium Score: {rps:.0f}<extra></extra>"))
     for x, lbl in [(25, "Developing"), (60, "Market Rate"), (85, "Premium")]:
         fig.add_annotation(x=x, y=0.5, text=lbl, font=dict(size=9, color="#4b5563"), showarrow=False)
-    fig.update_layout(**_L, height=130, showlegend=False,
+    fig.update_layout(**_L, margin=dict(l=10, r=10, t=30, b=20), height=130, showlegend=False,
                       xaxis=dict(range=[0, 100], showgrid=False, tickfont=dict(size=9, color="#6b7280")),
-                      yaxis=dict(range=[0, 1.2], showgrid=False, showticklabels=False),
-                      margin=dict(l=10, r=10, t=30, b=20))
+                      yaxis=dict(range=[0, 1.2], showgrid=False, showticklabels=False))
     return fig
 
 
@@ -447,7 +446,7 @@ def chart_age_distribution(df: pd.DataFrame, col: dict) -> go.Figure | None:
         text=counts.values.astype(int), textposition="outside",
         textfont=dict(size=10, color="#9ca3af"),
     ))
-    fig.update_layout(**_L, height=220,
+    fig.update_layout(**_L, margin=_M, height=220,
                       xaxis=dict(showgrid=False, tickfont=dict(size=10, color="#9ca3af")),
                       yaxis=dict(showgrid=False, showticklabels=False))
     return fig
@@ -463,7 +462,7 @@ def chart_channel_split(df: pd.DataFrame, col: dict) -> go.Figure | None:
         marker_color=colors[:len(ch)], marker_line_width=0,
         text=ch.values, textposition="outside", textfont=dict(size=10, color="#9ca3af"),
     ))
-    fig.update_layout(**_L, height=200,
+    fig.update_layout(**_L, margin=_M, height=200,
                       yaxis=dict(showgrid=False, tickfont=dict(size=10, color="#9ca3af")),
                       xaxis=dict(showgrid=False, showticklabels=False))
     return fig
@@ -752,7 +751,7 @@ def render_custom_explorer(df: pd.DataFrame) -> None:
     with c2: y_col = st.selectbox("Y axis", numeric_cols, index=min(1, len(numeric_cols)-1), key="cme_y")
     fig = go.Figure(go.Scatter(x=df[x_col], y=df[y_col], mode="markers",
                                marker=dict(color="#c8f135", size=5, opacity=0.6)))
-    fig.update_layout(**_L, height=280,
+    fig.update_layout(**_L, margin=_M, height=280,
                       xaxis=dict(title=x_col, tickfont=dict(size=9, color="#6b7280"), showgrid=False),
                       yaxis=dict(title=y_col, tickfont=dict(size=9, color="#6b7280"), showgrid=False))
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False}, key="cme_scatter")
