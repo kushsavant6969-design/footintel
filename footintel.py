@@ -217,12 +217,14 @@ def compute_commercial_score(df: pd.DataFrame, col: dict) -> pd.Series:
         scores = scores * 0.4 + _pct_rank(spd) * 0.6
     if "membership_type" in col and col["membership_type"] in df.columns:
         mem = df[col["membership_type"]].astype(str).str.strip().str.lower()
-        def _tier(x: str) -> int:
+        def _tier(x) -> int:
+            if not isinstance(x, str):
+                return 0
             for k, v in MEMBERSHIP_TIER_SCORES.items():
                 if k in x:
                     return v
             return 20
-        scores = scores * 0.5 + mem.map(_tier) * 0.5
+        scores = scores * 0.5 + mem.apply(_tier).astype(float) * 0.5
     return scores.clip(0, 100)
 
 
