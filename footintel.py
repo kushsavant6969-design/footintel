@@ -368,15 +368,15 @@ def chart_aqi_radar(aqi: dict) -> go.Figure:
     fig.add_trace(go.Scatterpolar(r=bench + [bench[0]], theta=cats + [cats[0]],
                                   fill="toself", fillcolor="rgba(61,156,240,0.06)",
                                   line=dict(color="#3d9cf0", width=1.5, dash="dash"), name="Industry Avg"))
-    fig.update_layout(**_L, height=320,
+    fig.update_layout(**{**_L, "margin": dict(l=40, r=40, t=30, b=40)},
+                      height=320,
                       polar=dict(bgcolor="#0d1117",
                                  radialaxis=dict(visible=True, range=[0, 100],
                                                  tickfont=dict(size=9, color="#6b7280"),
                                                  gridcolor="#1f2937", linecolor="#1f2937"),
                                  angularaxis=dict(tickfont=dict(size=10, color="#9ca3af"),
                                                   gridcolor="#1f2937")),
-                      legend=dict(font=dict(size=10, color="#9ca3af"), bgcolor="rgba(0,0,0,0)"),
-                      margin=dict(l=40, r=40, t=30, b=40))
+                      legend=dict(font=dict(size=10, color="#9ca3af"), bgcolor="rgba(0,0,0,0)"))
     return fig
 
 
